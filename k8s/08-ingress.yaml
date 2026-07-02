@@ -1,0 +1,74 @@
+---
+# Requires: nginx ingress controller  (kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml)
+# For TLS: install cert-manager and add annotations for your issuer.
+#
+# Replace 'ekap.example.com' with your actual hostname.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ekap-ingress
+  namespace: ekap
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # SSE: disable buffering so streaming responses reach the client immediately
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_cache off;
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    # Uncomment for TLS via cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  # tls:
+  #   - hosts: [ekap.example.com]
+  #     secretName: ekap-tls
+  rules:
+    - host: ekap.example.com
+      http:
+        paths:
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port: {number: 8080}
+          - path: /api/documents
+            pathType: Prefix
+            backend:
+              service:
+                name: ingestion-service
+                port: {number: 8000}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: retrieval-service
+                port: {number: 8000}
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: retrieval-service
+                port: {number: 8000}
+          - path: /metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: retrieval-service
+                port: {number: 8000}
+          - path: /grafana
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port: {number: 3000}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: open-webui
+                port: {number: 8080}

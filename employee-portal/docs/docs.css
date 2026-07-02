@@ -1,0 +1,48 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --c-primary:  #2563eb;
+  --c-ph:       #1d4ed8;
+  --c-text:     #1e293b;
+  --c-muted:    #64748b;
+  --c-border:   #e2e8f0;
+  --c-bg:       #f8fafc;
+  --c-surface:  #ffffff;
+  --c-sidebar:  #f1f5f9;
+  --r: 8px;
+  --r-sm: 5px;
+  --shadow: 0 1px 3px rgba(0,0,0,.07), 0 1px 2px rgba(0,0,0,.04);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+body { background: var(--c-bg); color: var(--c-text); font-size: 14.5px; line-height: 1.65; }
+
+.doc-app { display: flex; min-height: 100vh; }
+
+/* ── TOC sidebar ───────────────────────────────────────────────────────────── */
+.doc-toc { width: 230px; flex-shrink: 0; background: var(--c-sidebar); color: var(--c-muted);
+           padding: 22px 16px; position: sticky; top: 0; align-self: flex-start; height: 100vh;
+           overflow-y: auto; border-right: 1px solid var(--c-border); }
+.doc-toc-brand { color: var(--c-primary); font-weight: 700; font-size: 16px; margin-bottom: 2px; }
+.doc-toc-sub   { font-size: 11.5px; color: var(--c-muted); margin-bottom: 18px; }
+.doc-toc a { display: block; color: var(--c-text); text-decoration: none; font-size: 13px;
+             padding: 6px 8px; border-radius: var(--r-sm); margin-bottom: 1px; }
+.doc-toc a:hover { background: #e2e8f0; }
+.doc-toc .toc-back { display: block; color: var(--c-primary); font-weight: 600; font-size: 12.5px;
+                      margin-bottom: 16px; text-decoration: none; }
+
+/* ── Content ───────────────────────────────────────────────────────────────── */
+.doc-main { flex: 1; padding: 40px 48px; max-width: 880px; }
+.doc-main h1 { font-size: 26px; font-weight: 700; margin-bottom: 6px; }
+.doc-tagline { color: var(--c-muted); font-size: 14px; margin-bottom: 32px; }
+.doc-main section { margin-bottom: 34px; scroll-margin-top: 20px; }
+.doc-main h2 { font-size: 18px; font-weight: 700; margin-bottom: 10px; padding-bottom: 8px;
+               border-bottom: 1px solid var(--c-border); }
+.doc-main h3 { font-size: 14.5px; font-weight: 700; margin: 16px 0 6px; }
+.doc-main p { margin-bottom: 10px; }
+.doc-main ul, .doc-main ol { margin: 8px 0 10px 22px; }
+.doc-main li { margin-bottom: 4px; }
+.doc-main code { background: #eef2f7; padding: 1px 6px; border-radius: 4px;
+                  font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; color: #1d4ed8; }
+.doc-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r);
+            padding: 14px 18px; box-shadow: var(--shadow); margin: 10px 0; }

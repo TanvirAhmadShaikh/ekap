@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EKAP Admin</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-icon">⬡</span>
+        <div>
+          <div class="brand-name">EKAP</div>
+          <div class="brand-sub">Admin Portal</div>
+        </div>
+      </div>
+      <div class="notif-wrap">
+        <button class="notif-bell" id="notif-bell" onclick="toggleNotifPanel()">
+          <span class="ni">🔔</span>Notifications
+          <span class="nav-badge hidden" id="notif-badge">0</span>
+        </button>
+        <div class="notif-panel hidden" id="notif-panel">
+          <div class="notif-panel-head">
+            <span>Notifications</span>
+            <button class="btn btn-ghost btn-xs" onclick="markAllNotificationsRead()">Mark all read</button>
+          </div>
+          <div id="notif-list" class="notif-list">
+            <div class="spinner-wrap"><div class="spinner"></div></div>
+          </div>
+        </div>
+      </div>
+      <nav class="nav">
+        <a class="nav-item" href="#/dashboard" data-page="dashboard">
+          <span class="ni">⊞</span>Dashboard
+        </a>
+        <a class="nav-item" href="#/documents" data-page="documents">
+          <span class="ni">📄</span>Documents
+        </a>
+        <a class="nav-item" href="#/folders" data-page="folders">
+          <span class="ni">📁</span>Folders
+        </a>
+        <a class="nav-item" href="#/queue" data-page="queue">
+          <span class="ni">✓</span>Approval Queue
+          <span class="nav-badge hidden" id="queue-badge">0</span>
+        </a>
+        <a class="nav-item" href="#/trash" data-page="trash">
+          <span class="ni">🗑</span>Trash
+        </a>
+        <a class="nav-item" href="#/retention" data-page="retention">
+          <span class="ni">⚖</span>Retention
+        </a>
+        <a class="nav-item" href="#/audit-log" data-page="audit-log">
+          <span class="ni">🔗</span>Audit Log
+        </a>
+        <a class="nav-item" href="#/settings" data-page="settings">
+          <span class="ni">⚙</span>LLM Settings
+        </a>
+      </nav>
+      <div class="sidebar-ext">
+        <div class="ext-label">Documentation</div>
+        <a class="ext-link" href="docs/admin-help.html" target="_blank">📘 Admin Help</a>
+        <a class="ext-link" href="docs/technical-help.html" target="_blank">🛠 Technical Help</a>
+      </div>
+      <div class="sidebar-ext">
+        <div class="ext-label">External</div>
+        <a class="ext-link" href="/" target="_blank">💬 Open WebUI (Chat)</a>
+        <a class="ext-link" href="/grafana/" target="_blank">📊 Grafana</a>
+        <a class="ext-link" href="/auth/admin" target="_blank">🔐 Keycloak</a>
+        <a class="ext-link" href="/portal/" target="_blank">👤 Employee Portal</a>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div id="content" class="content"></div>
+    </main>
+  </div>
+
+  <!-- Upload Modal -->
+  <div class="overlay hidden" id="upload-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 class="modal-title">Upload Document</h2>
+        <button class="btn-close" onclick="closeUpload()">✕</button>
+      </div>
+      <form id="upload-form" class="modal-body">
+        <div class="field">
+          <label class="label">File <span class="req">*</span></label>
+          <input class="input" type="file" id="f-file"
+            accept=".pdf,.docx,.txt,.md,.html,.csv,.xlsx,.pptx,.jpg,.jpeg,.png,.tiff,.bmp,.webp" required>
+        </div>
+        <div class="field">
+          <label class="label">Title <span class="req">*</span></label>
+          <input class="input" type="text" id="f-title" placeholder="Document title" required>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label class="label">Owner</label>
+            <input class="input" type="text" id="f-owner" value="admin">
+          </div>
+          <div class="field">
+            <label class="label">Department</label>
+            <input class="input" type="text" id="f-dept" placeholder="Engineering">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label class="label">Classification</label>
+            <select class="input" id="f-class">
+              <option>Public</option>
+              <option selected>Internal</option>
+              <option>Confidential</option>
+              <option>Restricted</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="label">Folder</label>
+            <select class="input" id="f-folder"><option value="">None</option></select>
+          </div>
+        </div>
+        <div class="field">
+          <label class="label">Tags (comma-separated)</label>
+          <input class="input" type="text" id="f-tags" placeholder="policy, hr, 2024">
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" onclick="closeUpload()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="upload-btn">Upload</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Possible Duplicate Modal -->
+  <div class="overlay hidden" id="duplicate-modal">
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h2 class="modal-title">Possible Duplicate</h2>
+        <button class="btn-close" onclick="closeDuplicateModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="duplicate-message" style="font-size:13.5px;line-height:1.5"></p>
+        <div class="modal-foot" style="flex-wrap:wrap">
+          <button class="btn btn-ghost" onclick="closeDuplicateModal()">Cancel</button>
+          <button class="btn btn-blue" onclick="useAsNewVersion()">Upload as New Version</button>
+          <button class="btn btn-warning" onclick="forceUploadAnyway()">Upload Anyway</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upload New Version Modal -->
+  <div class="overlay hidden" id="version-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <h2 class="modal-title">Upload New Version</h2>
+          <div class="modal-meta" id="version-doc-title"></div>
+        </div>
+        <button class="btn-close" onclick="closeVersionModal()">✕</button>
+      </div>
+      <form id="version-form" class="modal-body">
+        <div class="field">
+          <label class="label">File <span class="req">*</span></label>
+          <input class="input" type="file" id="v-file"
+            accept=".pdf,.docx,.txt,.md,.html,.csv,.xlsx,.pptx,.jpg,.jpeg,.png,.tiff,.bmp,.webp" required>
+        </div>
+        <div class="field">
+          <label class="label">Change note</label>
+          <textarea class="input" id="v-note" rows="3" placeholder="What changed in this version?"></textarea>
+        </div>
+        <p class="llm-note">
+          This replaces the document's content and sends it back through the approval
+          workflow (state resets to Draft). Previous versions stay available in the audit trail.
+        </p>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" onclick="closeVersionModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="version-btn">Upload Version</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Access Grants Modal -->
+  <div class="overlay hidden" id="permissions-modal">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <div>
+          <h2 class="modal-title">Document Access</h2>
+          <div class="modal-meta" id="perm-doc-title"></div>
+        </div>
+        <button class="btn-close" onclick="closePermissionsModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="llm-note">
+          Grants a specific user read access to this document regardless of their
+          classification level. Users who already qualify via classification don't need a grant.
+        </p>
+        <form id="perm-form" style="display:flex;gap:10px;align-items:flex-end;margin-bottom:14px">
+          <div class="field autocomplete" style="flex:1">
+            <label class="label">User ID / username</label>
+            <input class="input" type="text" id="perm-user-id" placeholder="Start typing a name or username…"
+                   autocomplete="off" required
+                   oninput="handleUserSearch(this.value)"
+                   onfocus="handleUserSearch(this.value)">
+            <div class="autocomplete-list hidden" id="perm-user-suggestions"></div>
+          </div>
+          <button type="submit" class="btn btn-primary" id="perm-grant-btn">Grant Access</button>
+        </form>
+        <div id="perm-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preview Modal -->
+  <div class="overlay hidden" id="preview-modal">
+    <div class="modal modal-xl">
+      <div class="modal-head">
+        <div>
+          <h2 class="modal-title" id="preview-title">Preview</h2>
+          <div id="preview-meta" class="modal-meta"></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <a class="btn btn-ghost" id="preview-download" href="#" download>⬇ Download</a>
+          <button class="btn-close" onclick="closePreview()">✕</button>
+        </div>
+      </div>
+      <div class="modal-body preview-wrap" id="preview-body">
+        <div class="spinner-wrap"><div class="spinner"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Audit Trail Modal -->
+  <div class="overlay hidden" id="audit-modal">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <div>
+          <h2 class="modal-title" id="audit-title">Audit Trail</h2>
+          <div class="modal-meta">Version and workflow history</div>
+        </div>
+        <button class="btn-close" onclick="closeAuditModal()">✕</button>
+      </div>
+      <div class="modal-body" id="audit-body">
+        <div class="spinner-wrap"><div class="spinner"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Workflow Comment Modal -->
+  <div class="overlay hidden" id="wf-modal">
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h2 class="modal-title" id="wf-title">Confirm Action</h2>
+        <button class="btn-close" onclick="closeWfModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label class="label">Comment (optional)</label>
+          <textarea class="input" id="wf-comment" rows="3" placeholder="Add a note…"></textarea>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" onclick="closeWfModal()">Cancel</button>
+          <button class="btn btn-primary" id="wf-confirm">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <script src="admin.js"></script>
+</body>
+</html>

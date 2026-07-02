@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EKAP Knowledge Base</title>
+  <link rel="stylesheet" href="portal.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="topbar-logo">⬡</span>
+      <div>
+        <span class="topbar-name">EKAP</span>
+        <span class="topbar-sub">Knowledge Base</span>
+      </div>
+    </div>
+    <div class="search-wrap">
+      <input class="search-input" type="search" id="search-input"
+             placeholder="Search documents…" oninput="handleSearch(this.value)">
+      <span class="search-icon">🔍</span>
+    </div>
+    <div class="topbar-right">
+      <button class="topbar-btn topbar-btn-chat" id="chat-toggle-btn" onclick="toggleChat()">
+        💬 AI Chat
+      </button>
+      <a class="topbar-btn" href="docs/user-manual.html" target="_blank">📖 User Manual</a>
+      <a class="topbar-btn topbar-btn-admin" href="/admin/" target="_blank">⚙ Admin</a>
+    </div>
+  </header>
+
+  <div class="layout" id="layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">Folders</div>
+      <div id="folder-tree"><div class="loading">Loading…</div></div>
+    </aside>
+
+    <main class="main" id="main">
+      <div id="main-content">
+        <div class="loading-wrap"><div class="spinner"></div></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Chat slider panel -->
+  <div class="chat-panel" id="chat-panel">
+    <div class="chat-head">
+      <div class="chat-head-info">
+        <span class="chat-head-icon">⬡</span>
+        <div>
+          <div class="chat-head-title">AI Assistant</div>
+          <div class="chat-head-sub">Answers from the knowledge base<span class="chat-head-model" id="chat-model-badge"></span></div>
+        </div>
+      </div>
+      <div class="chat-head-actions">
+        <button class="chat-head-btn" title="New conversation" onclick="newChat()">↺</button>
+        <button class="chat-head-btn" title="Close" onclick="toggleChat()">✕</button>
+      </div>
+    </div>
+
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-welcome">
+        <div class="chat-welcome-icon">⬡</div>
+        <p class="chat-welcome-title">How can I help you?</p>
+        <p class="chat-welcome-sub">Ask anything — I'll search the knowledge base and answer with sources.</p>
+        <div class="chat-suggestions">
+          <button class="chat-suggestion" onclick="sendSuggestion(this)">What policies are available?</button>
+          <button class="chat-suggestion" onclick="sendSuggestion(this)">Summarise recent engineering docs</button>
+          <button class="chat-suggestion" onclick="sendSuggestion(this)">What are the onboarding steps?</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-input-wrap">
+      <textarea class="chat-input" id="chat-input"
+                placeholder="Ask a question…"
+                rows="1"
+                onkeydown="handleChatKey(event)"
+                oninput="autoResize(this)"></textarea>
+      <button class="chat-send" id="chat-send" onclick="sendMessage()" title="Send">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M1.5 1.5l13 6.5-13 6.5V9.5l9-1.5-9-1.5V1.5z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Preview Modal -->
+  <div class="overlay hidden" id="preview-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <h2 class="modal-title" id="preview-title">Document</h2>
+          <div class="modal-meta" id="preview-meta"></div>
+        </div>
+        <div class="modal-actions">
+          <a class="btn btn-outline" id="preview-dl" href="#" download>⬇ Download</a>
+          <button class="btn-close" onclick="closePreview()">✕</button>
+        </div>
+      </div>
+      <div class="preview-body" id="preview-body">
+        <div class="loading-wrap"><div class="spinner"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <script src="portal.js"></script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EKAP — Admin Help</title>
+<link rel="stylesheet" href="docs.css">
+</head>
+<body>
+<div class="doc-app">
+  <aside class="doc-toc">
+    <a class="toc-back" href="../index.html">← Back to Admin Portal</a>
+    <div class="doc-toc-brand">EKAP</div>
+    <div class="doc-toc-sub">Admin Help</div>
+    <a href="#overview">Overview</a>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#documents">Documents</a>
+    <a href="#folders">Folders</a>
+    <a href="#queue">Approval Queue</a>
+    <a href="#trash">Trash</a>
+    <a href="#llm-settings">LLM Settings</a>
+    <a href="#roles">Roles &amp; Permissions</a>
+    <a href="#external">External Links</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+    <div class="toc-switch">
+      <a href="technical-help.html">→ Technical Help</a>
+    </div>
+  </aside>
+
+  <main class="doc-main">
+    <h1>Admin Help</h1>
+    <p class="doc-tagline">A guide to running the EKAP Admin Portal day-to-day.</p>
+
+    <section id="overview">
+      <h2>Overview</h2>
+      <p>The Admin Portal is where content owners and administrators manage everything that
+      feeds the knowledge assistant: uploading and classifying documents, organizing folders,
+      approving content through the review workflow, and choosing which LLM answers questions
+      in chat.</p>
+      <p>Nothing you do here is visible to end users until it passes through the approval
+      workflow (see <a href="#queue">Approval Queue</a>) — draft and in-review documents are
+      never returned by retrieval.</p>
+    </section>
+
+    <section id="dashboard">
+      <h2>⊞ Dashboard</h2>
+      <p>The landing page. Gives an at-a-glance view of total documents, items pending
+      approval, storage used, and recent ingestion activity so you can spot stuck or failed
+      uploads quickly.</p>
+    </section>
+
+    <section id="documents">
+      <h2>📄 Documents</h2>
+      <p>The master list of everything ingested into EKAP. From here you can:</p>
+      <ul>
+        <li><strong>Upload</strong> a new file (PDF, DOCX, TXT, Markdown, HTML, CSV, Excel,
+        PowerPoint, or common image formats for OCR) and set its title, owner, department,
+        classification, folder, and tags.</li>
+        <li><strong>Preview</strong> a document in-browser before publishing it.</li>
+        <li><strong>Reindex</strong> a document after it or its metadata changes, so the vector
+        index stays in sync.</li>
+        <li><strong>Track processing status</strong> — each row shows the ingestion stage
+        (extraction, chunking, embedding) and a progress bar while a job is running.</li>
+      </ul>
+      <h3>Classification levels</h3>
+      <table class="doc-table">
+        <tr><th>Level</th><th>Meaning</th></tr>
+        <tr><td>Public</td><td>Visible to anyone with portal access</td></tr>
+        <tr><td>Internal</td><td>Default — visible to all authenticated employees</td></tr>
+        <tr><td>Confidential</td><td>Restricted to specific departments/roles</td></tr>
+        <tr><td>Restricted</td><td>Tightest access — named users or admin-only</td></tr>
+      </table>
+      <p>Classification directly drives the permission check the retrieval service performs
+      before a chunk can be returned to a user — set it deliberately.</p>
+    </section>
+
+    <section id="folders">
+      <h2>📁 Folders</h2>
+      <p>Folders group documents for browsing in the Employee Portal (e.g. by department or
+      topic) and can carry their own default department/classification that new uploads
+      inherit. Folders can be nested.</p>
+    </section>
+
+    <section id="queue">
+      <h2>✓ Approval Queue</h2>
+      <p>Every uploaded document moves through a workflow: <span class="doc-badge">Draft</span>
+      → <span class="doc-badge">In Review</span> → <span class="doc-badge">Approved</span> →
+      <span class="doc-badge">Published</span>. The queue lists everything waiting on a
+      decision. Approving or rejecting an item lets you attach an optional comment, which is
+      recorded in the document's history for audit purposes. Only <strong>Published</strong>
+      documents are eligible for retrieval — the badge on this nav item shows the current queue
+      depth.</p>
+    </section>
+
+    <section id="trash">
+      <h2>🗑 Trash</h2>
+      <p>Deleted documents land here first rather than being destroyed immediately. You can
+      restore a document back into circulation or permanently purge it. Purged documents are
+      removed from both PostgreSQL metadata and the Qdrant vector index.</p>
+    </section>
+
+    <section id="llm-settings">
+      <h2>⚙ LLM Settings</h2>
+      <p>Choose which model vLLM serves for chat completions (e.g. Llama 3.x, Qwen 3, Mistral,
+      Mixtral). Only one model is active at a time; switching models here changes what every
+      user's chat session talks to going forward, so coordinate with users before swapping to a
+      materially different model.</p>
+    </section>
+
+    <section id="roles">
+      <h2>Roles &amp; Permissions</h2>
+      <table class="doc-table">
+        <tr><th>Role</th><th>Can do</th></tr>
+        <tr><td>User</td><td>Search &amp; chat over documents they're permitted to see</td></tr>
+        <tr><td>Power User</td><td>User rights + advanced query/filtering features</td></tr>
+        <tr><td>Knowledge Manager</td><td>Upload, classify, and organize documents; work the approval queue</td></tr>
+        <tr><td>Administrator</td><td>Full Admin Portal access, including LLM settings</td></tr>
+        <tr><td>System Administrator</td><td>Administrator rights + infrastructure (Keycloak, Grafana)</td></tr>
+      </table>
+      <p>Roles and group membership are managed in Keycloak, not in this portal — see
+      <a href="#external">External Links</a>.</p>
+    </section>
+
+    <section id="external">
+      <h2>External Links</h2>
+      <p>The sidebar's <strong>External</strong> section jumps to the other services in the
+      stack:</p>
+      <ul>
+        <li><strong>Open WebUI (Chat)</strong> — the end-user chat interface end users actually
+        use to ask questions.</li>
+        <li><strong>Grafana</strong> — dashboards for system health, latency, and usage
+        metrics.</li>
+        <li><strong>Keycloak</strong> — identity provider admin console: manage users, roles,
+        groups, and SSO configuration.</li>
+        <li><strong>Employee Portal</strong> — the document browsing UI end users see.</li>
+      </ul>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>Troubleshooting</h2>
+      <ul>
+        <li><strong>A document is stuck "Processing"</strong> — check the ingestion service
+        logs; a failed virus scan, unsupported format, or OCR failure will leave a document in
+        a failed state with an error shown on hover.</li>
+        <li><strong>A published document doesn't show up in chat answers</strong> — confirm its
+        classification isn't excluding the asking user's role, and that it was reindexed after
+        the last edit.</li>
+        <li><strong>Can't reach Keycloak or Grafana links</strong> — those are reverse-proxied
+        by NGINX; confirm the underlying containers are healthy.</li>
+      </ul>
+      <p>For architecture-level issues, see the <a href="technical-help.html">Technical
+      Help</a> documentation.</p>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,145 @@
+---
+# ── Ingestion Service ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-service
+  namespace: ekap
+  labels:
+    app: ingestion-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ingestion-service
+  template:
+    metadata:
+      labels:
+        app: ingestion-service
+    spec:
+      containers:
+        - name: ingestion-service
+          image: ekap-ingestion-service:latest
+          imagePullPolicy: Never
+          env:
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-user}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-password}
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-db}
+            - name: QDRANT_URL
+              value: http://qdrant:6333
+            - name: KEYCLOAK_URL
+              value: http://keycloak:8080/auth
+            - name: KEYCLOAK_REALM
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-realm}
+            - name: REQUIRE_AUTH
+              value: "true"
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits:   {cpu: "2",  memory: 4Gi}
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion-service
+  namespace: ekap
+spec:
+  selector:
+    app: ingestion-service
+  ports:
+    - port: 8000
+---
+# ── Retrieval Service ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: retrieval-service
+  namespace: ekap
+  labels:
+    app: retrieval-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: retrieval-service
+  template:
+    metadata:
+      labels:
+        app: retrieval-service
+    spec:
+      containers:
+        - name: retrieval-service
+          image: ekap-retrieval-service:latest
+          imagePullPolicy: Never
+          env:
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-user}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-password}
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-db}
+            - name: QDRANT_URL
+              value: http://qdrant:6333
+            - name: LLM_BASE_URL
+              value: http://vllm:8000/v1
+            - name: KEYCLOAK_URL
+              value: http://keycloak:8080/auth
+            - name: KEYCLOAK_REALM
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-realm}
+            - name: REQUIRE_AUTH
+              value: "true"
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits:   {cpu: "2",  memory: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieval-service
+  namespace: ekap
+spec:
+  selector:
+    app: retrieval-service
+  ports:
+    - port: 8000

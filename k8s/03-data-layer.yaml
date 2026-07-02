@@ -1,0 +1,133 @@
+---
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: ekap
+data:
+  init.sql: |
+    -- loaded from host at build time; mount via init configmap
+    -- In production, bake init.sql into a postgres init ConfigMap
+    -- or use a managed PostgreSQL service (RDS, Cloud SQL, etc.)
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: ekap
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-user}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-password}
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-db}
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ekap", "-d", "ekap"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits:   {cpu: "1",  memory: 2Gi}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: init-sql
+          configMap:
+            name: postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ekap
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+  clusterIP: None
+---
+# ── Qdrant ────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  namespace: ekap
+  labels:
+    app: qdrant
+spec:
+  serviceName: qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:v1.9.4
+          ports:
+            - containerPort: 6333
+            - containerPort: 6334
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+          readinessProbe:
+            httpGet: {path: /healthz, port: 6333}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits:   {cpu: "2",  memory: 4Gi}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: qdrant-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  namespace: ekap
+spec:
+  selector:
+    app: qdrant
+  ports:
+    - name: http
+      port: 6333
+    - name: grpc
+      port: 6334
+  clusterIP: None

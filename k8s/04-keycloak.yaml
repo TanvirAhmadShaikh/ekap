@@ -1,0 +1,101 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: ekap
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:24.0
+          args: ["start-dev"]
+          env:
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL
+              value: jdbc:postgresql://postgres:5432/keycloak
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-user}
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: postgres-password}
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-admin}
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-admin-password}
+            - name: KC_HTTP_RELATIVE_PATH
+              value: /auth
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HOSTNAME
+              value: "localhost"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /auth/health/ready, port: 8080}
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            failureThreshold: 10
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits:   {cpu: "2",  memory: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: ekap
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - port: 8080
+---
+# ── Keycloak one-shot setup Job ───────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-setup
+  namespace: ekap
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: setup
+          image: ekap-keycloak-setup:latest
+          imagePullPolicy: Never
+          env:
+            - name: KC_URL
+              value: http://keycloak:8080/auth
+            - name: KC_ADMIN
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-admin}
+            - name: KC_ADMIN_PASS
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-admin-password}
+            - name: KC_REALM
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-realm}
+            - name: KC_CLIENT_ID
+              valueFrom:
+                secretKeyRef: {name: ekap-secrets, key: keycloak-client-id}
+            - name: KC_REDIRECT_URI
+              value: "https://your-domain.example.com/*"

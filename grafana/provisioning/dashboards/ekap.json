@@ -1,0 +1,324 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "EKAP — Enterprise Knowledge Assistant Platform operational dashboard",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "Query Pipeline",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 1},
+            {"color": "red", "value": 5}
+          ]},
+          "unit": "reqps",
+          "mappings": []
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "title": "Query Rate",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(ekap_queries_total[5m])", "legendFormat": "qps", "refId": "A"}]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 2},
+            {"color": "red", "value": 5}
+          ]},
+          "unit": "s",
+          "mappings": []
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "id": 2,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "title": "P95 Query Latency",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "histogram_quantile(0.95, rate(ekap_query_latency_seconds_bucket[5m]))", "legendFormat": "p95", "refId": "A"}]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]},
+          "unit": "short",
+          "mappings": []
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "id": 3,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "title": "Query Errors (5m)",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "increase(ekap_queries_total{status=\"error\"}[5m])", "legendFormat": "errors", "refId": "A"}]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 50},
+            {"color": "red", "value": 100}
+          ]},
+          "unit": "short",
+          "mappings": []
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "id": 4,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "title": "Docs Ingested (total)",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "ekap_ingestions_total{status=\"completed\"}", "legendFormat": "completed", "refId": "A"}]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]},
+          "unit": "short",
+          "mappings": []
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "id": 5,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "title": "Ingestion Failures (total)",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "ekap_ingestions_total{status=\"failed\"}", "legendFormat": "failed", "refId": "A"}]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "id": 10,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "title": "Query Rate over Time",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(ekap_queries_total{status=\"ok\"}[5m])", "legendFormat": "ok", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(ekap_queries_total{status=\"error\"}[5m])", "legendFormat": "error", "refId": "B"}
+      ]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "s"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "id": 11,
+      "options": {
+        "legend": {"calcs": ["mean", "max", "p95"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "title": "Query Latency Percentiles",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "histogram_quantile(0.50, rate(ekap_query_latency_seconds_bucket[5m]))", "legendFormat": "p50", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "histogram_quantile(0.95, rate(ekap_query_latency_seconds_bucket[5m]))", "legendFormat": "p95", "refId": "B"},
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "histogram_quantile(0.99, rate(ekap_query_latency_seconds_bucket[5m]))", "legendFormat": "p99", "refId": "C"}
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13},
+      "id": 101,
+      "title": "Ingestion Pipeline",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "id": 20,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "title": "Ingestion Events (rate)",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(ekap_ingestions_total{status=\"queued\"}[5m])", "legendFormat": "queued", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(ekap_ingestions_total{status=\"completed\"}[5m])", "legendFormat": "completed", "refId": "B"},
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(ekap_ingestions_total{status=\"failed\"}[5m])", "legendFormat": "failed", "refId": "C"}
+      ]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "id": 21,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "title": "Qdrant REST Requests",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(app_info[5m])", "legendFormat": "qdrant alive", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(rest_responses_total[5m])", "legendFormat": "{{method}} {{endpoint}}", "refId": "B"}
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22},
+      "id": 102,
+      "title": "Infrastructure",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "bytes", "min": 0},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
+      "id": 30,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "title": "Qdrant Collection Sizes",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "collections_total_vectors_count", "legendFormat": "{{collection}}", "refId": "A"}
+      ]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 0.001}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
+      "id": 31,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{"displayName": "Up", "desc": false}]
+      },
+      "title": "Service Health",
+      "type": "table",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "up", "legendFormat": "{{job}}", "refId": "A", "instant": true}
+      ],
+      "transformations": [
+        {"id": "organize", "options": {"renameByName": {"Value": "Up", "job": "Service"}}}
+      ]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "bytes"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 31},
+      "id": 32,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "title": "Process Memory (RSS)",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "process_resident_memory_bytes{job=~\"retrieval-service|ingestion-service\"}", "legendFormat": "{{job}}", "refId": "A"}
+      ]
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "ekap-prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "percentunit", "min": 0, "max": 1},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 31},
+      "id": 33,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "mean"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "title": "CPU Usage",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "ekap-prometheus"}, "expr": "rate(process_cpu_seconds_total{job=~\"retrieval-service|ingestion-service\"}[1m])", "legendFormat": "{{job}}", "refId": "A"}
+      ]
+    }
+
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["ekap", "rag", "operations"],
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "EKAP Operations",
+  "uid": "ekap-ops-v1",
+  "version": 1
+}

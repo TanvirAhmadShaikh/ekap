@@ -1,0 +1,290 @@
+services:
+
+  # ── Data layer ─────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.9.4
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  # ── Auth ───────────────────────────────────────────────────────────────────
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: localhost
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  keycloak-setup:
+    build:
+      context: ./keycloak
+    environment:
+      KC_URL: http://keycloak:8080/auth
+      KC_ADMIN: ${KEYCLOAK_ADMIN}
+      KC_ADMIN_PASS: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_REALM: ${KEYCLOAK_REALM:-ekap}
+      KC_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-ekap-web}
+      KC_REDIRECT_URI: http://localhost/*
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    networks:
+      - ekap-net
+    restart: "no"
+
+  # ── LLM (GPU profile — run with: docker compose --profile gpu up) ──────────
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - --model
+      - ${VLLM_MODEL}
+      - --served-model-name
+      - ekap-llm
+      - --max-model-len
+      - "8192"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - vllm_models:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+    profiles:
+      - gpu
+
+  # ── Application services ───────────────────────────────────────────────────
+
+  ingestion-service:
+    build:
+      context: ./ingestion-service
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      QDRANT_URL: http://qdrant:6333
+      KEYCLOAK_URL: http://keycloak:8080/auth
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-ekap}
+      REQUIRE_AUTH: ${REQUIRE_AUTH:-false}
+      # Used only to look up usernames for the document access-grant UI (admin-cli
+      # password grant against the master realm, same as keycloak-setup).
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  retrieval-service:
+    build:
+      context: ./retrieval-service
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      QDRANT_URL: http://qdrant:6333
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11435/v1}
+      LLM_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      KEYCLOAK_URL: http://keycloak:8080/auth
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-ekap}
+      REQUIRE_AUTH: ${REQUIRE_AUTH:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    environment:
+      OPENAI_API_BASE_URL: http://retrieval-service:8000/v1
+      OPENAI_API_KEY: ekap-internal
+      WEBUI_AUTH: "true"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      # Keycloak OIDC SSO — enabled after keycloak-setup runs
+      ENABLE_OAUTH_SIGNUP: "true"
+      OAUTH_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-ekap-web}
+      OAUTH_CLIENT_SECRET: ""
+      OPENID_PROVIDER_URL: http://keycloak:8080/auth/realms/${KEYCLOAK_REALM:-ekap}/.well-known/openid-configuration
+      OAUTH_PROVIDER_NAME: "EKAP SSO"
+      # Allow container-to-container token exchange via keycloak hostname
+    extra_hosts:
+      - "localhost:host-gateway"
+    volumes:
+      - open_webui_data:/app/backend/data
+    depends_on:
+      retrieval-service:
+        condition: service_healthy
+      keycloak-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  # ── Monitoring ─────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/grafana/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+  # ── Reverse proxy ──────────────────────────────────────────────────────────
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./admin-ui:/usr/share/nginx/html/admin:ro
+      - ./employee-portal:/usr/share/nginx/html/portal:ro
+    depends_on:
+      open-webui:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - ekap-net
+    restart: unless-stopped
+
+# ── Volumes ────────────────────────────────────────────────────────────────
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  vllm_models:
+  uploads:
+  open_webui_data:
+  prometheus_data:
+  grafana_data:
+
+# ── Networks ───────────────────────────────────────────────────────────────
+
+networks:
+  ekap-net:
+    driver: bridge

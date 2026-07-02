@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ekap
+
+resources:
+  - 00-namespace.yaml
+  - 01-secrets.yaml
+  - 02-storage.yaml
+  - 03-data-layer.yaml
+  - 04-keycloak.yaml
+  - 05-app-services.yaml
+  - 06-frontend.yaml
+  - 07-monitoring.yaml
+  - 08-ingress.yaml
+
+# Override image tags for a real registry:
+# images:
+#   - name: ekap-ingestion-service
+#     newName: registry.example.com/ekap/ingestion-service
+#     newTag: "1.0.0"
+#   - name: ekap-retrieval-service
+#     newName: registry.example.com/ekap/retrieval-service
+#     newTag: "1.0.0"
+#   - name: ekap-keycloak-setup
+#     newName: registry.example.com/ekap/keycloak-setup
+#     newTag: "1.0.0"

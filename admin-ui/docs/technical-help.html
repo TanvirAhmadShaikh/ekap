@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EKAP — Technical Documentation</title>
+<link rel="stylesheet" href="docs.css">
+</head>
+<body>
+<div class="doc-app">
+  <aside class="doc-toc">
+    <a class="toc-back" href="../index.html">← Back to Admin Portal</a>
+    <div class="doc-toc-brand">EKAP</div>
+    <div class="doc-toc-sub">Technical Documentation</div>
+    <a href="#overview">Overview</a>
+    <a href="#stack">Stack</a>
+    <a href="#architecture">Architecture Flow</a>
+    <a href="#services">Services (Docker Compose)</a>
+    <a href="#ingestion">Ingestion Pipeline</a>
+    <a href="#retrieval">Retrieval Strategy</a>
+    <a href="#security">Security / RBAC</a>
+    <a href="#api">REST API</a>
+    <a href="#routing">NGINX Routing</a>
+    <a href="#deployment">Deployment</a>
+    <a href="#observability">Observability &amp; Backups</a>
+    <a href="#nfr">Non-Functional Requirements</a>
+    <div class="toc-switch">
+      <a href="admin-help.html">→ Admin Help</a>
+    </div>
+  </aside>
+
+  <main class="doc-main">
+    <h1>Technical Documentation</h1>
+    <p class="doc-tagline">Full-stack architecture reference for the Enterprise Knowledge
+    Assistant Platform (EKAP).</p>
+
+    <section id="overview">
+      <h2>Overview</h2>
+      <p>EKAP is a fully self-hosted, open-source enterprise knowledge assistant. Employees
+      query company knowledge in natural language and get answers grounded in permitted
+      documents, with citations. There are no external AI services or proprietary software
+      dependencies — every component runs on infrastructure the organization controls.</p>
+      <p>Core design principles: centralized storage (no client-side document copies),
+      security-first (permission checks always run before retrieval), and zero-trust between
+      internal services.</p>
+    </section>
+
+    <section id="stack">
+      <h2>Stack</h2>
+      <table class="doc-table">
+        <tr><th>Layer</th><th>Technology</th><th>Role</th></tr>
+        <tr><td>Frontend (chat)</td><td>Open WebUI</td><td>End-user chat interface</td></tr>
+        <tr><td>Frontend (docs)</td><td>Employee Portal (static)</td><td>Document browsing, search, chat panel</td></tr>
+        <tr><td>Frontend (admin)</td><td>Admin Portal (static)</td><td>Document/folder/workflow/LLM management</td></tr>
+        <tr><td>Auth</td><td>Keycloak</td><td>LDAP/AD, OAuth2, OIDC, MFA, group sync, SSO</td></tr>
+        <tr><td>API</td><td>FastAPI</td><td>Retrieval orchestration, security enforcement, audit logging</td></tr>
+        <tr><td>LLM</td><td>vLLM</td><td>OpenAI-compatible inference (Llama 3.x, Qwen 3, Mistral, Mixtral), streaming, GPU</td></tr>
+        <tr><td>Vector DB</td><td>Qdrant</td><td>Embedding storage and similarity search</td></tr>
+        <tr><td>Metadata DB</td><td>PostgreSQL</td><td>Document metadata, workflow state, conversations</td></tr>
+        <tr><td>Monitoring</td><td>Prometheus + Grafana</td><td>Metrics collection and dashboards</td></tr>
+        <tr><td>Reverse Proxy</td><td>NGINX</td><td>TLS termination, routing, rate limiting</td></tr>
+        <tr><td>Deployment</td><td>Docker Compose (dev) / Kubernetes (prod)</td><td>Orchestration</td></tr>
+      </table>
+    </section>
+
+    <section id="architecture">
+      <h2>Architecture Flow</h2>
+      <pre><code>Users → NGINX → Open WebUI → FastAPI Gateway (retrieval-service)
+                              → Retrieval Router
+                                  → Vector (Qdrant)
+                                  → Hierarchical (Doc→Chapter→Section→Chunk)
+                                  → BM25
+                                  → Metadata filter
+                              → Context Builder → vLLM → Response (with citations)</code></pre>
+      <p>The Admin Portal and Employee Portal are separate static SPAs served by NGINX
+      alongside the proxied services; they call <code>ingestion-service</code> and
+      <code>retrieval-service</code> directly over <code>/api/*</code>.</p>
+    </section>
+
+    <section id="services">
+      <h2>Services (Docker Compose)</h2>
+      <p>Defined in <code>docker-compose.yml</code>, on the shared <code>ekap-net</code> network:</p>
+      <ul>
+        <li><strong>nginx</strong> — single entrypoint, TLS termination, routing, static hosting for admin-ui and employee-portal.</li>
+        <li><strong>open-webui</strong> — chat frontend; talks to <code>retrieval-service</code> as an OpenAI-compatible backend; OIDC SSO via Keycloak.</li>
+        <li><strong>keycloak</strong> + <strong>keycloak-setup</strong> — identity provider; the setup container bootstraps the <code>ekap</code> realm and <code>ekap-web</code> client on first run.</li>
+        <li><strong>postgres</strong> — metadata DB backing both the app and Keycloak's own store.</li>
+        <li><strong>qdrant</strong> — vector index for embeddings.</li>
+        <li><strong>vllm</strong> — GPU-backed OpenAI-compatible LLM inference server.</li>
+        <li><strong>retrieval-service</strong> — FastAPI; query orchestration, security enforcement, chat/completions.</li>
+        <li><strong>ingestion-service</strong> — FastAPI; upload, extraction, classification, chunking, embedding, indexing, folders/workflow.</li>
+        <li><strong>prometheus</strong> + <strong>grafana</strong> — metrics collection and dashboards.</li>
+      </ul>
+    </section>
+
+    <section id="ingestion">
+      <h2>Ingestion Pipeline</h2>
+      <pre><code>Upload → Virus Scan → Text Extraction → Metadata Extraction
+       → Classification → Chunking → Embedding Generation
+       → Index Creation → Storage</code></pre>
+      <p>Supported formats: PDF, DOCX, TXT, Markdown, HTML, CSV, Excel, PowerPoint, Confluence
+      exports, Wiki pages.</p>
+      <h3>Document classification fields</h3>
+      <p><code>document_id</code>, <code>title</code>, <code>owner</code>,
+      <code>department</code>, <code>creation_date</code>, <code>last_modified_date</code>,
+      <code>version</code>, <code>classification_level</code>
+      (Public/Internal/Confidential/Restricted), <code>tags</code>.</p>
+      <p>Documents flow through a workflow state machine (Draft → In Review → Approved →
+      Published → Archived/Trash) managed by <code>ingestion-service</code> and surfaced in the
+      Admin Portal's Approval Queue.</p>
+    </section>
+
+    <section id="retrieval">
+      <h2>Retrieval Strategy</h2>
+      <p>Strategy is chosen by document size:</p>
+      <ul>
+        <li><strong>Small docs (&lt;50 pages)</strong> — vector retrieval (Qdrant).</li>
+        <li><strong>Medium docs (50–300 pages)</strong> — hierarchical retrieval
+        (Doc → Chapter → Section → Chunk).</li>
+        <li><strong>Large docs (&gt;300 pages)</strong> — document-level retrieval with long
+        context processing.</li>
+        <li><strong>Hybrid</strong> — combines vector + BM25 + hierarchical signals, ranks, and
+        selects the highest-confidence result.</li>
+      </ul>
+      <p>Every answer returned to a user must include citations: Document Name, Section Name,
+      Page Number, Confidence Score, and a Source Link.</p>
+    </section>
+
+    <section id="security">
+      <h2>Security / RBAC</h2>
+      <p>Roles: <strong>User</strong>, <strong>Power User</strong>,
+      <strong>Administrator</strong>, <strong>Knowledge Manager</strong>,
+      <strong>System Administrator</strong>. Roles and group membership live in Keycloak.</p>
+      <p>The permission check runs <strong>before</strong> retrieval on every query —
+      unauthorized chunks are filtered out before they ever reach the context builder, so a
+      user can never see content their role/classification doesn't permit, even indirectly
+      through a generated answer.</p>
+      <p>Both <code>retrieval-service</code> and <code>ingestion-service</code> validate
+      bearer tokens against Keycloak (<code>KEYCLOAK_URL</code> /
+      <code>KEYCLOAK_REALM</code>); see <code>auth.py</code> in each service.</p>
+    </section>
+
+    <section id="api">
+      <h2>REST API</h2>
+      <table class="doc-table">
+        <tr><th>Method</th><th>Path</th><th>Purpose</th></tr>
+        <tr><td>POST</td><td><code>/api/query</code></td><td>Ask a question, get a grounded answer with citations</td></tr>
+        <tr><td>POST</td><td><code>/api/documents/upload</code></td><td>Upload a new document</td></tr>
+        <tr><td>POST</td><td><code>/api/documents/reindex</code></td><td>Re-run chunking/embedding for a document</td></tr>
+        <tr><td>GET</td><td><code>/api/documents</code></td><td>List documents</td></tr>
+        <tr><td>GET</td><td><code>/api/documents/{id}</code></td><td>Get document detail</td></tr>
+        <tr><td>DELETE</td><td><code>/api/documents/{id}</code></td><td>Delete (soft) a document</td></tr>
+        <tr><td>GET</td><td><code>/api/conversations</code></td><td>List chat conversations</td></tr>
+        <tr><td>POST</td><td><code>/api/feedback</code></td><td>Submit answer feedback</td></tr>
+        <tr><td>GET</td><td><code>/api/metrics</code></td><td>Usage/health metrics</td></tr>
+      </table>
+      <p><code>/api/documents</code>, <code>/api/folders</code>, and
+      <code>/api/workflow</code> are routed to <code>ingestion-service</code>;
+      <code>/api/query</code>, <code>/api/conversations</code>, <code>/api/feedback</code>,
+      <code>/api/llm</code>, and OpenAI-compatible <code>/v1/*</code> routes go to
+      <code>retrieval-service</code> — see <a href="#routing">NGINX Routing</a>.</p>
+    </section>
+
+    <section id="routing">
+      <h2>NGINX Routing</h2>
+      <p>Single entrypoint on port 80 (<code>nginx/nginx.conf</code>):</p>
+      <table class="doc-table">
+        <tr><th>Path</th><th>Destination</th></tr>
+        <tr><td><code>/admin/</code></td><td>Static Admin Portal</td></tr>
+        <tr><td><code>/portal/</code></td><td>Static Employee Portal</td></tr>
+        <tr><td><code>/auth/</code></td><td>Keycloak</td></tr>
+        <tr><td><code>/api/documents/upload</code></td><td>ingestion-service (strict rate limit)</td></tr>
+        <tr><td><code>/api/(documents|folders|workflow)</code></td><td>ingestion-service</td></tr>
+        <tr><td><code>/v1/*</code></td><td>retrieval-service (OpenAI-compatible)</td></tr>
+        <tr><td><code>/api/(query|conversations|feedback|llm)</code></td><td>retrieval-service</td></tr>
+        <tr><td><code>/grafana/</code></td><td>Grafana</td></tr>
+        <tr><td><code>/</code> (catch-all)</td><td>Open WebUI</td></tr>
+      </table>
+      <p>Rate limiting zones: <code>api</code> (60 req/min per IP) and <code>upload</code>
+      (10 req/min per IP, stricter due to upload cost).</p>
+    </section>
+
+    <section id="deployment">
+      <h2>Deployment</h2>
+      <p><strong>Development:</strong> <code>docker-compose.yml</code> brings up the full
+      stack locally.</p>
+      <p><strong>Production:</strong> Kubernetes manifests under <code>k8s/</code>, applied via
+      <code>kustomization.yaml</code>:</p>
+      <ul>
+        <li><code>00-namespace.yaml</code>, <code>01-secrets.yaml</code></li>
+        <li><code>02-storage.yaml</code> — persistent volumes</li>
+        <li><code>03-data-layer.yaml</code> — Postgres, Qdrant</li>
+        <li><code>04-keycloak.yaml</code></li>
+        <li><code>05-app-services.yaml</code> — retrieval-service, ingestion-service</li>
+        <li><code>06-frontend.yaml</code> — open-webui, admin-ui, employee-portal</li>
+        <li><code>07-monitoring.yaml</code> — Prometheus, Grafana</li>
+        <li><code>08-ingress.yaml</code></li>
+      </ul>
+    </section>
+
+    <section id="observability">
+      <h2>Observability &amp; Backups</h2>
+      <p>Prometheus scrapes service metrics (<code>prometheus/prometheus.yml</code>); Grafana
+      visualizes them, reachable via the Admin Portal's external link.</p>
+      <p>Backup/restore scripts live in <code>scripts/</code>
+      (<code>backup.sh</code>, <code>restore.sh</code>); <code>bundle.sh</code> packages a
+      release bundle. Daily backups are required, target RTO &lt;4h.</p>
+    </section>
+
+    <section id="nfr">
+      <h2>Non-Functional Requirements</h2>
+      <ul>
+        <li>Availability: 99.5%</li>
+        <li>Concurrency: 500+ simultaneous users</li>
+        <li>Response target: &lt;10s typical, 60s hard timeout</li>
+        <li>Zero-trust internal architecture — services authenticate to each other, not just
+        the edge</li>
+        <li>Daily backups, RTO &lt;4h</li>
+      </ul>
+    </section>
+  </main>
+</div>
+</body>
+</html>
