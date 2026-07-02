@@ -2,6 +2,7 @@
 Phase 7 — Document Management System router.
 Handles folders, versioning, lifecycle workflow, preview, and download.
 """
+import csv
 import hashlib
 import io
 import json
@@ -605,21 +606,35 @@ async def revoke_permission(document_id: str, target_user_id: str, user: UserCon
 # in Python, so there's no risk of a JSON/text serialization mismatch producing
 # a false positive.
 
+def _audit_log_filters(
+    event_type: Optional[str], user_id: Optional[str],
+    start: Optional[str], end: Optional[str],
+) -> tuple[list[str], list]:
+    filters, params = [], []
+    if event_type:
+        filters.append("event_type = %s"); params.append(event_type)
+    if user_id:
+        filters.append("user_id = %s"); params.append(user_id)
+    if start:
+        filters.append("timestamp >= %s"); params.append(start)
+    if end:
+        filters.append("timestamp <= %s"); params.append(end)
+    return filters, params
+
+
 @router.get("/api/audit-log")
 async def list_audit_log(
     event_type: Optional[str] = None,
     user_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     user: UserContext = Depends(get_user_context),
 ):
     if not user.can_manage_documents():
         raise HTTPException(403, "Requires knowledge-manager or higher.")
-    filters, params = [], []
-    if event_type:
-        filters.append("event_type = %s"); params.append(event_type)
-    if user_id:
-        filters.append("user_id = %s"); params.append(user_id)
+    filters, params = _audit_log_filters(event_type, user_id, start, end)
     where = ("WHERE " + " AND ".join(filters)) if filters else ""
     conn = get_conn()
     try:
@@ -636,6 +651,54 @@ async def list_audit_log(
         return {"entries": rows, "total": total, "limit": limit, "offset": offset}
     finally:
         conn.close()
+
+
+@router.get("/api/audit-log/export")
+async def export_audit_log(
+    event_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    user: UserContext = Depends(get_user_context),
+):
+    """CSV export of a date/time-ranged slice of the audit log — includes the
+    hash-chain columns so the exported subset can be independently verified
+    offline later. Unlike the browse endpoint, this has no pagination cap:
+    it's meant to produce a complete record for a given range."""
+    if not user.can_manage_documents():
+        raise HTTPException(403, "Requires knowledge-manager or higher.")
+    filters, params = _audit_log_filters(event_type, user_id, start, end)
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, timestamp, user_id, event_type, resource_id, details, prev_hash, row_hash "
+                f"FROM audit_log {where} ORDER BY id ASC",
+                params,
+            )
+            rows = cur.fetchall()
+            _audit(cur, user.user_id, "AUDIT_LOG_EXPORTED", None,
+                   {"by": user.username, "start": start, "end": end,
+                    "event_type": event_type, "user_id_filter": user_id, "rows": len(rows)})
+        conn.commit()
+    finally:
+        conn.close()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["id", "timestamp", "user_id", "event_type", "resource_id", "details", "prev_hash", "row_hash"])
+    for r in rows:
+        row = list(r)
+        row[5] = json.dumps(row[5])  # details: JSONB -> JSON string for a plain CSV cell
+        writer.writerow(row)
+
+    filename = f"audit-log-{(start or 'all').replace(':', '')}-{(end or 'all').replace(':', '')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/api/audit-log/verify")

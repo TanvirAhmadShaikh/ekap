@@ -518,17 +518,34 @@ async function runRetentionSweepNow() {
 }
 
 /* ── Audit log (tamper-evident hash chain) ─────────────────────────────────── */
-async function pageAuditLog(offset = 0) {
+// <input type="datetime-local"> values have no timezone info ("2026-07-01T00:00");
+// sent as-is, Postgres interprets them in the DB's own timezone rather than the
+// browser's, silently shifting the window. new Date(local) parses a bare
+// date-time string as local time per the ECMAScript spec, so converting through
+// it and back out via toISOString() gives the correct UTC instant to send.
+function localDateTimeToUTC(local) {
+  if (!local) return '';
+  const d = new Date(local);
+  return isNaN(d) ? '' : d.toISOString();
+}
+
+async function pageAuditLog(offset = 0, start = '', end = '') {
+  const qs = new URLSearchParams({ limit: 50, offset });
+  const startUtc = localDateTimeToUTC(start);
+  const endUtc   = localDateTimeToUTC(end);
+  if (startUtc) qs.set('start', startUtc);
+  if (endUtc)   qs.set('end', endUtc);
+
   const [verify, data] = await Promise.all([
     apiFetch('/api/audit-log/verify'),
-    apiFetch(`/api/audit-log?limit=50&offset=${offset}`),
+    apiFetch(`/api/audit-log?${qs}`),
   ]);
   const entries = data.entries || [];
 
   q('content').innerHTML = `
     <div class="page-header">
       <h1>Audit Log <span style="color:var(--c-muted);font-size:14px;font-weight:400">${data.total} entries</span></h1>
-      <button class="btn btn-ghost btn-sm" onclick="pageAuditLog(${offset})">↺ Re-verify</button>
+      <button class="btn btn-ghost btn-sm" onclick="pageAuditLog(${offset},${attrJson(start)},${attrJson(end)})">↺ Re-verify</button>
     </div>
     <div class="card" style="padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;gap:10px;
          background:${verify.valid ? '#f0fdf4' : '#fef2f2'};border-left:4px solid ${verify.valid ? 'var(--c-success)' : 'var(--c-danger)'}">
@@ -540,6 +557,21 @@ async function pageAuditLog(offset = 0) {
         <div style="font-size:12px;color:var(--c-muted)">
           ${verify.checked} entries checked${verify.valid ? '' : ` — first broken entry: #${verify.first_broken_id}`}
         </div>
+      </div>
+    </div>
+    <div class="card filters">
+      <div class="filter-row" style="align-items:flex-end">
+        <div class="field">
+          <label class="label">From</label>
+          <input class="input" type="datetime-local" id="audit-start" value="${esc(start)}">
+        </div>
+        <div class="field">
+          <label class="label">To</label>
+          <input class="input" type="datetime-local" id="audit-end" value="${esc(end)}">
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="applyAuditLogRange()">Apply Range</button>
+        <button class="btn btn-ghost btn-sm" onclick="pageAuditLog()">Clear</button>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="exportAuditLog()">⬇ Export CSV</button>
       </div>
     </div>
     <div class="card">
@@ -557,14 +589,29 @@ async function pageAuditLog(offset = 0) {
                 title="${esc(JSON.stringify(e.details))}">${esc(JSON.stringify(e.details))}</td>
           </tr>`).join('')}
       </tbody></table></div>
-      ${!entries.length ? '<div class="empty"><div class="empty-icon">🔗</div><p>No audit entries yet.</p></div>' : `
+      ${!entries.length ? '<div class="empty"><div class="empty-icon">🔗</div><p>No audit entries in range.</p></div>' : `
       <div style="display:flex;justify-content:space-between;padding:12px 16px">
         <button class="btn btn-ghost btn-sm" ${offset === 0 ? 'disabled' : ''}
-          onclick="pageAuditLog(${Math.max(0, offset - 50)})">← Newer</button>
+          onclick="pageAuditLog(${Math.max(0, offset - 50)},${attrJson(start)},${attrJson(end)})">← Newer</button>
         <button class="btn btn-ghost btn-sm" ${offset + 50 >= data.total ? 'disabled' : ''}
-          onclick="pageAuditLog(${offset + 50})">Older →</button>
+          onclick="pageAuditLog(${offset + 50},${attrJson(start)},${attrJson(end)})">Older →</button>
       </div>`}
     </div>`;
+}
+
+function applyAuditLogRange() {
+  const start = q('audit-start').value;
+  const end   = q('audit-end').value;
+  pageAuditLog(0, start, end);
+}
+
+function exportAuditLog() {
+  const startUtc = localDateTimeToUTC(q('audit-start')?.value || '');
+  const endUtc   = localDateTimeToUTC(q('audit-end')?.value || '');
+  const qs = new URLSearchParams();
+  if (startUtc) qs.set('start', startUtc);
+  if (endUtc)   qs.set('end', endUtc);
+  window.location = `/api/audit-log/export?${qs}`;
 }
 
 /* ── Upload modal ───────────────────────────────────────────────────────────── */
