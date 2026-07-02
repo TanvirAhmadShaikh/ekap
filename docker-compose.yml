@@ -51,6 +51,9 @@ services:
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME: localhost
+      # Nginx publishes Keycloak externally on 8080, not 80 — without this,
+      # Keycloak's own redirect/console URLs drop the port entirely.
+      KC_HOSTNAME_PORT: "8080"
     depends_on:
       postgres:
         condition: service_healthy
