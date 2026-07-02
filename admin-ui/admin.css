@@ -224,11 +224,11 @@ textarea.input { resize: vertical; }
 .preview-wrap { padding: 0; position: relative; }
 .preview-wrap iframe { display: block; width: 100%; height: calc(90vh - 110px); border: none; }
 .preview-wrap img    { max-width: 100%; max-height: calc(90vh - 140px); display: block; margin: auto; }
-.preview-html, .preview-text {
+.preview-text {
   padding: 20px; overflow: auto; max-height: calc(90vh - 140px);
   font-size: 13.5px; line-height: 1.6;
+  font-family: monospace; white-space: pre-wrap;
 }
-.preview-text { font-family: monospace; white-space: pre-wrap; }
 .preview-partial-note {
   position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
   background: rgba(15,23,42,.85); color: #fff; font-size: 12px; font-weight: 500;

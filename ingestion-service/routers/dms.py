@@ -39,6 +39,17 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ekap:changeme@postgres:54
 UPLOAD_DIR   = Path(os.getenv("UPLOAD_DIR", "/app/uploads"))
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "false").lower() == "true"
 
+
+def safe_filename(filename: str) -> str:
+    """Strip any directory/traversal components from a user-supplied filename
+    before it's used to build a filesystem path — Path("../../x").name still
+    returns '..' verbatim if the whole string is just '..', so that's guarded
+    separately rather than relying on .name alone."""
+    name = Path(filename or "").name
+    if not name or name in (".", ".."):
+        name = "upload"
+    return name
+
 ALLOWED_EXTENSIONS = {
     ".pdf", ".docx", ".txt", ".md", ".html", ".csv", ".xlsx", ".pptx",
     ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp",
@@ -161,12 +172,18 @@ async def get_folder(folder_id: str, user: UserContext = Depends(get_user_contex
                 raise HTTPException(404, "Folder not found.")
             cols  = [d[0] for d in cur.description]
             folder = dict(zip(cols, row))
-            # Documents in this folder
+            # Documents in this folder — same classification gate as GET /api/documents,
+            # so browsing a folder can't surface titles/metadata a user isn't cleared for.
+            filters, params = ["folder_id=%s", "deleted_at IS NULL"], [folder_id]
+            if not user.can_manage_documents():
+                placeholders = ",".join(["%s"] * len(user.accessible_classifications))
+                filters.append(f"classification IN ({placeholders})")
+                params.extend(list(user.accessible_classifications))
             cur.execute(
-                "SELECT document_id, title, owner, classification, status, lifecycle_state, "
-                "file_type, page_count, current_version, created_at "
-                "FROM documents WHERE folder_id=%s AND deleted_at IS NULL ORDER BY title",
-                (folder_id,),
+                f"SELECT document_id, title, owner, classification, status, lifecycle_state, "
+                f"file_type, page_count, current_version, created_at "
+                f"FROM documents WHERE {' AND '.join(filters)} ORDER BY title",
+                params,
             )
             dcols = [d[0] for d in cur.description]
             docs  = [dict(zip(dcols, r)) for r in cur.fetchall()]
@@ -293,7 +310,7 @@ async def upload_new_version(
         with conn.cursor() as cur:
             doc = _require_doc(cur, document_id)
             new_ver = doc["current_version"] + 1
-            dest = UPLOAD_DIR / document_id / f"v{new_ver}_{file.filename}"
+            dest = UPLOAD_DIR / document_id / f"v{new_ver}_{safe_filename(file.filename)}"
             dest.parent.mkdir(parents=True, exist_ok=True)
             content = await file.read()
             dest.write_bytes(content)
@@ -1121,7 +1138,14 @@ def _to_html_docx(path: Path) -> str:
     import mammoth
     with path.open("rb") as f:
         result = mammoth.convert_to_html(f)
-    return f"<html><body>{result.value}</body></html>"
+    # Self-contained styling — this now renders inside a sandboxed iframe with
+    # its own document context, so it can no longer borrow the admin portal's
+    # own page CSS the way an innerHTML-inserted div could.
+    return (
+        "<html><head><style>body{font-family:sans-serif;max-width:860px;margin:auto;"
+        "padding:24px;line-height:1.6}</style></head>"
+        f"<body>{result.value}</body></html>"
+    )
 
 
 def _to_html_xlsx(path: Path, limit: Optional[int] = None) -> tuple[str, int, int]:

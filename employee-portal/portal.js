@@ -189,13 +189,14 @@ async function openPreview(docId, title, meta = {}) {
       const previewPages = parseInt(res.headers.get('X-Preview-Pages') || '0', 10);
       const partial      = totalPages > previewPages;
       const html = await res.text();
-      q('preview-body').innerHTML = `<div class="preview-html">${html}</div>` + (partial
+      q('preview-body').innerHTML = partial
         ? `<div class="preview-partial-note">Showing first ${previewPages} of ${totalPages} pages — loading the rest in the background…</div>`
-        : '');
+        : '';
+      q('preview-body').appendChild(makeSandboxedHtmlIframe(html));
       if (partial) loadFullPreviewInBackground(docId, myToken, async fullRes => {
         const container = q('preview-body');
-        const oldWrap = container?.querySelector('.preview-html');
-        if (container && oldWrap) await swapHtmlSeamless(container, oldWrap, await fullRes.text());
+        const oldFrame = container?.querySelector('iframe');
+        if (container && oldFrame) await swapHtmlSeamless(container, oldFrame, await fullRes.text());
       });
     } else if (ct.includes('application/pdf')) {
       const totalPages   = parseInt(res.headers.get('X-Total-Pages') || '0', 10);
@@ -251,20 +252,33 @@ function swapIframeSeamless(container, oldIframe, newUrl) {
 }
 
 // Same idea for HTML previews (docx/xlsx/pptx/md/html/txt/csv) — crossfade the
-// fully-rendered replacement in rather than swapping innerHTML in place.
-function swapHtmlSeamless(container, oldWrap, newHtml) {
+// fully-rendered replacement in. Rendered inside a fully sandboxed iframe (see
+// makeSandboxedHtmlIframe) rather than innerHTML, so a malicious uploaded
+// document can't run script in the app's own origin.
+function swapHtmlSeamless(container, oldFrame, newHtml) {
   return new Promise(resolve => {
-    const newWrap = document.createElement('div');
-    newWrap.className = 'preview-html preview-fade';
-    newWrap.innerHTML = newHtml;
-    container.insertBefore(newWrap, oldWrap.nextSibling);
-    requestAnimationFrame(() => newWrap.classList.add('preview-fade-in'));
+    const newFrame = makeSandboxedHtmlIframe(newHtml);
+    newFrame.classList.add('preview-fade');
+    container.insertBefore(newFrame, oldFrame.nextSibling);
+    requestAnimationFrame(() => newFrame.classList.add('preview-fade-in'));
     setTimeout(() => {
-      oldWrap.remove();
-      newWrap.classList.remove('preview-fade', 'preview-fade-in');
+      oldFrame.remove();
+      newFrame.classList.remove('preview-fade', 'preview-fade-in');
       resolve();
     }, 260);
   });
+}
+
+// Renders untrusted document-derived HTML (docx/xlsx/pptx/md/html/txt/csv
+// conversions) inside a maximally-sandboxed iframe — no scripts, no
+// same-origin, no forms/popups — so embedded <script>, onerror=, onload=,
+// javascript: URLs etc. in an uploaded document can never execute against
+// the portal's own session/cookies/tokens.
+function makeSandboxedHtmlIframe(html) {
+  const iframe = document.createElement('iframe');
+  iframe.sandbox = '';
+  iframe.srcdoc = html;
+  return iframe;
 }
 
 // Large documents (any type) preview with just the first few "pages"; fetch the

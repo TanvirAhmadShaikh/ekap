@@ -119,8 +119,6 @@ body { background: var(--c-bg); color: var(--c-text); font-size: 14px; line-heig
 .preview-body { flex: 1; overflow: auto; position: relative; }
 .preview-body iframe { display: block; width: 100%; height: calc(90vh - 100px); border: none; }
 .preview-body img    { max-width: 100%; display: block; margin: 20px auto; }
-.preview-html { padding: 20px; font-size: 14px; line-height: 1.7; overflow: auto;
-                max-height: calc(90vh - 100px); }
 .preview-text { padding: 20px; font-family: monospace; font-size: 13px; white-space: pre-wrap;
                 overflow: auto; max-height: calc(90vh - 100px); }
 .preview-partial-note {

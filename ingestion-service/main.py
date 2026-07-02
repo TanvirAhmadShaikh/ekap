@@ -45,6 +45,17 @@ except ImportError:
 DATABASE_URL       = os.getenv("DATABASE_URL", "postgresql://ekap:changeme@postgres:5432/ekap")
 QDRANT_URL         = os.getenv("QDRANT_URL", "http://qdrant:6333")
 UPLOAD_DIR         = Path(os.getenv("UPLOAD_DIR", "/app/uploads"))
+
+
+def safe_filename(filename: str) -> str:
+    """Strip any directory/traversal components from a user-supplied filename
+    before it's used to build a filesystem path — Path("../../x").name still
+    returns '..' verbatim if the whole string is just '..', so that's guarded
+    separately rather than relying on .name alone."""
+    name = Path(filename or "").name
+    if not name or name in (".", ".."):
+        name = "upload"
+    return name
 COLLECTION_NAME    = "ekap_chunks"
 SECTIONS_COLLECTION = "ekap_sections"
 EMBEDDING_MODEL    = "BAAI/bge-small-en-v1.5"
@@ -677,7 +688,7 @@ async def upload_document(
             conn.close()
 
     document_id = str(uuid.uuid4())
-    dest = UPLOAD_DIR / document_id / file.filename
+    dest = UPLOAD_DIR / document_id / safe_filename(file.filename)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
 
