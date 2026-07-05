@@ -68,6 +68,7 @@ services:
     restart: unless-stopped
 
   keycloak-setup:
+    image: ekap-keycloak-setup:latest
     build:
       context: ./keycloak
     environment:
@@ -121,6 +122,7 @@ services:
   # ── Application services ───────────────────────────────────────────────────
 
   ingestion-service:
+    image: ekap-ingestion-service:latest
     build:
       context: ./ingestion-service
     environment:
@@ -151,6 +153,7 @@ services:
     restart: unless-stopped
 
   retrieval-service:
+    image: ekap-retrieval-service:latest
     build:
       context: ./retrieval-service
     environment:

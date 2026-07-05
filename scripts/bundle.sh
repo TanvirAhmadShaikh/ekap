@@ -42,6 +42,7 @@ tar -C "$PROJECT_DIR" \
     --exclude='*.pyc' \
     --exclude='*.pyo' \
     --exclude='.env' \
+    --exclude='ekap-bundle-*.tar.gz' \
     -cf - . | tar -C "$BUNDLE_DIR" -xf -
 echo "  ✓ Source code copied"
 
@@ -51,6 +52,7 @@ if [ -f "$PROJECT_DIR/.env" ]; then
   sed \
     -e 's/\(PASSWORD\s*=\s*\).*/\1CHANGE_ME/' \
     -e 's/\(SECRET_KEY\s*=\s*\).*/\1CHANGE_ME_32_CHAR_RANDOM_STRING/' \
+    -e 's/\(CLIENT_SECRET\s*=\s*\).*/\1CHANGE_ME/' \
     -e 's/\(HF_TOKEN\s*=\s*\).*/\1/' \
     "$PROJECT_DIR/.env" > "$BUNDLE_DIR/.env.template"
   echo "  ✓ .env.template created (fill in passwords before deploying)"
@@ -68,6 +70,12 @@ echo "  (ingestion-service + retrieval-service + keycloak-setup)"
 docker save "${CUSTOM_IMAGES[@]}" | gzip > "$BUNDLE_DIR/images-custom.tar.gz"
 echo "  ✓ Custom images saved: $(du -sh "$BUNDLE_DIR/images-custom.tar.gz" | cut -f1)"
 
+# Record the CPU architecture these images were built for, so install.sh on
+# the target machine can detect a mismatch (e.g. amd64 bundle → Apple Silicon
+# Mac) and rebuild from source instead of loading images that won't run.
+docker version --format '{{.Server.Arch}}' > "$BUNDLE_DIR/.bundle-arch" 2>/dev/null \
+  || uname -m > "$BUNDLE_DIR/.bundle-arch"
+
 # ── 4. Third-party images (optional) ─────────────────────────────────────────
 if [ "$ALL_IMAGES" = true ]; then
   echo "▸ Saving third-party Docker images (this may take a while)…"
@@ -79,6 +87,7 @@ if [ "$ALL_IMAGES" = true ]; then
     "grafana/grafana:10.4.3"
     "nginx:1.27-alpine"
     "python:3.11-slim"
+    "vllm/vllm-openai:latest"
   )
   docker save "${THIRD_PARTY[@]}" | gzip > "$BUNDLE_DIR/images-thirdparty.tar.gz"
   echo "  ✓ Third-party images: $(du -sh "$BUNDLE_DIR/images-thirdparty.tar.gz" | cut -f1)"
@@ -151,10 +160,32 @@ if ! docker compose version &>/dev/null; then
   exit 1
 fi
 
-# ── Port 80 check ─────────────────────────────────────────────────────────────
-if ss -tlnp 2>/dev/null | grep -q ':80 ' || netstat -tlnp 2>/dev/null | grep -q ':80 '; then
+# ── Port 80 check (lsof works on both Linux and macOS; ss/netstat as fallback) ─
+PORT_80_BUSY=false
+if command -v lsof &>/dev/null; then
+  lsof -iTCP:80 -sTCP:LISTEN -Pn &>/dev/null && PORT_80_BUSY=true
+elif command -v ss &>/dev/null; then
+  ss -tlnp 2>/dev/null | grep -q ':80 ' && PORT_80_BUSY=true
+elif command -v netstat &>/dev/null; then
+  netstat -tlnp 2>/dev/null | grep -q ':80 ' && PORT_80_BUSY=true
+fi
+if [ "$PORT_80_BUSY" = true ]; then
   echo "⚠  Port 80 is in use. EKAP nginx is mapped to 8080:80 so this is fine."
   echo "   If port 8080 is also in use, edit nginx ports in docker-compose.yml."
+fi
+
+# ── Architecture check ────────────────────────────────────────────────────────
+# Docker images are architecture-specific (amd64 vs arm64). If this bundle was
+# built on a different CPU architecture than this machine (e.g. bundled on an
+# amd64 Linux box, installing on an Apple Silicon Mac), the saved custom images
+# won't run natively — rebuild them from the bundled source instead.
+BUILD_FROM_SOURCE=false
+TARGET_ARCH="$(docker version --format '{{.Server.Arch}}' 2>/dev/null || true)"
+BUNDLE_ARCH="$(cat .bundle-arch 2>/dev/null || echo unknown)"
+if [ -n "$TARGET_ARCH" ] && [ "$BUNDLE_ARCH" != "unknown" ] && [ "$TARGET_ARCH" != "$BUNDLE_ARCH" ]; then
+  echo "⚠  Bundle images were built for '$BUNDLE_ARCH', this machine's Docker is '$TARGET_ARCH'."
+  echo "   Will build the 3 custom images from source for this machine instead."
+  BUILD_FROM_SOURCE=true
 fi
 
 # ── .env setup ────────────────────────────────────────────────────────────────
@@ -173,10 +204,16 @@ if [ ! -f .env ]; then
   fi
 fi
 
-# ── Load Docker images ────────────────────────────────────────────────────────
-echo "▸ Loading custom Docker images…"
-gunzip -c images-custom.tar.gz | docker load
-echo "  ✓ Custom images loaded"
+# ── Load (or build) custom Docker images ──────────────────────────────────────
+if [ "$BUILD_FROM_SOURCE" = true ]; then
+  echo "▸ Building custom images from source for $TARGET_ARCH…"
+  docker compose build ingestion-service retrieval-service keycloak-setup
+  echo "  ✓ Custom images built"
+else
+  echo "▸ Loading custom Docker images…"
+  gunzip -c images-custom.tar.gz | docker load
+  echo "  ✓ Custom images loaded"
+fi
 
 if [ -f images-thirdparty.tar.gz ]; then
   echo "▸ Loading third-party images (offline mode)…"
@@ -244,6 +281,16 @@ if [ "$RESTORE_PG" = true ]; then
 fi
 
 docker compose up -d
+
+# ── Local IP lookup (Linux `hostname -I` has no macOS equivalent) ─────────────
+get_ip() {
+  hostname -I 2>/dev/null | awk '{print $1}' && return
+  command -v ipconfig &>/dev/null && ipconfig getifaddr en0 2>/dev/null && return
+  command -v ipconfig &>/dev/null && ipconfig getifaddr en1 2>/dev/null && return
+  echo "localhost"
+}
+IP="$(get_ip)"
+
 echo
 echo "════════════════════════════════════════"
 echo "  EKAP is starting up!"
@@ -254,11 +301,11 @@ echo "  Check status: docker compose ps"
 echo "  View logs:    docker compose logs -f"
 echo
 echo "  Once healthy, access at:"
-echo "    Employee portal  →  http://$(hostname -I | awk '{print $1}'):8080/portal/"
-echo "    Admin portal     →  http://$(hostname -I | awk '{print $1}'):8080/admin/"
-echo "    Chat (OpenWebUI) →  http://$(hostname -I | awk '{print $1}'):8080/"
-echo "    Keycloak admin   →  http://$(hostname -I | awk '{print $1}'):8080/auth/admin"
-echo "    Grafana          →  http://$(hostname -I | awk '{print $1}'):8080/grafana/"
+echo "    Employee portal  →  http://${IP}:8080/portal/"
+echo "    Admin portal     →  http://${IP}:8080/admin/"
+echo "    Chat (OpenWebUI) →  http://${IP}:8080/"
+echo "    Keycloak admin   →  http://${IP}:8080/auth/admin"
+echo "    Grafana          →  http://${IP}:8080/grafana/"
 echo
 INSTALL_EOF
 chmod +x "$BUNDLE_DIR/install.sh"
