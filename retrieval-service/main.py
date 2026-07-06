@@ -55,7 +55,9 @@ SYSTEM_PROMPT = (
     "and tell the user the document has not been fully indexed yet.\n"
     "- Never infer, guess, or expand on what a source *might* say beyond what is explicitly quoted.\n"
     "- If the answer is genuinely not present in the context, say exactly: "
-    "\"I don't have that information in the knowledge base.\""
+    "\"I don't have that information in the knowledge base.\"\n"
+    "- Give your answer exactly once. Do not restate, summarize, or repeat it "
+    "in a second pass or under a heading like 'Answer:'."
 )
 
 qdrant: QdrantClient = None
@@ -367,7 +369,10 @@ async def _gpu_status() -> str:
 
 async def stream_llm(messages: list[dict], cid: str, citations: list[dict], strategy: str, chunk_count: int):
     try:
-        payload = {"model": _current_model, "messages": messages, "stream": True}
+        payload = {
+            "model": _current_model, "messages": messages, "stream": True,
+            "repetition_penalty": 1.15,  # discourage the model re-emitting a duplicate "Answer:" pass
+        }
         if "vllm" not in LLM_BASE_URL:
             payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
         async with llm_client.stream("POST", f"{LLM_BASE_URL}/chat/completions", json=payload) as resp:
@@ -472,7 +477,10 @@ async def chat_completions(request: Request, user: UserContext = Depends(get_use
         return StreamingResponse(stream_llm(augmented, cid, citations, strategy, len(chunks)), media_type="text/event-stream")
 
     try:
-        payload = {"model": _current_model, "messages": augmented, "stream": False}
+        payload = {
+            "model": _current_model, "messages": augmented, "stream": False,
+            "repetition_penalty": 1.15,  # discourage the model re-emitting a duplicate "Answer:" pass
+        }
         if "vllm" not in LLM_BASE_URL:
             payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
         resp = await llm_client.post(f"{LLM_BASE_URL}/chat/completions", json=payload)
