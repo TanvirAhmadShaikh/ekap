@@ -180,6 +180,7 @@ const PAGES = {
   '/retention': pageRetention,
   '/audit-log': pageAuditLog,
   '/settings':  pageSettings,
+  '/gpu-setup': pageGpuSetup,
 };
 
 async function router() {
@@ -1413,36 +1414,6 @@ async function pageSettings() {
     </div>
 
     <div class="card" style="margin-bottom:16px">
-      <div class="card-head"><h2>Hardware &amp; GPU Setup</h2></div>
-      <div style="padding:16px 20px">
-        ${gpuStatusRowHTML(config)}
-        <p class="gpu-status-detail">
-          This reflects the <b>${esc(config.backend === 'vllm' ? 'vLLM' : 'Ollama')}</b> backend
-          (<code>${esc(config.base_url)}</code>) for the currently active model. Because Docker
-          isolates containers from the real host, EKAP can only report what the LLM backend
-          itself sees — it can't inspect the host's OS or GPU driver directly.
-        </p>
-        ${config.gpu === 'cpu' || config.gpu === 'unknown' ? `
-        <div class="gpu-warning-box">
-          ⚠ The active model does not appear to be using a GPU. If this machine has one,
-          download and run the setup-check script below <b>on the machine that hosts
-          Docker/Ollama</b> — it detects your OS and GPU driver setup and prints the exact
-          commands to fix it (or confirms CPU-only is expected/correct for this hardware).
-        </div>` : ''}
-        <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <a class="btn btn-ghost btn-sm" href="docs/gpu-setup-check.sh" download>⬇ Download setup-check script</a>
-          <span class="gpu-status-detail" style="margin:0">
-            Run on the host: <code>chmod +x gpu-setup-check.sh && ./gpu-setup-check.sh</code>
-          </span>
-        </div>
-        <p class="gpu-status-detail">
-          On a headless server without a browser, fetch it directly instead:
-          <code>curl -o gpu-setup-check.sh ${esc(location.origin)}/admin/docs/gpu-setup-check.sh</code>
-        </p>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:16px">
       <div class="card-head">
         <h2>Installed Models</h2>
         <button class="btn btn-ghost btn-sm" onclick="pageSettings()">↺ Refresh</button>
@@ -1484,6 +1455,107 @@ async function pageSettings() {
     </div>`;
 
   if (pulling.length) scheduleModelsPoll();
+}
+
+/* ── Hardware / GPU setup ───────────────────────────────────────────────────── */
+async function pageGpuSetup() {
+  let config, history;
+  try {
+    [config, history] = await Promise.all([
+      apiFetch('/api/llm/config'),
+      apiFetch('/api/llm/gpu-diagnostics'),
+    ]);
+  } catch(e) {
+    q('content').innerHTML = `<div class="empty"><p>⚠ ${esc(e.message)}</p></div>`;
+    return;
+  }
+  const entries = history.entries || [];
+
+  q('content').innerHTML = `
+    <div class="page-header"><h1>Hardware &amp; GPU Setup</h1></div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h2>Detected from inside the stack</h2></div>
+      <div style="padding:16px 20px">
+        ${gpuStatusRowHTML(config)}
+        <p class="gpu-status-detail">
+          This reflects the <b>${esc(config.backend === 'vllm' ? 'vLLM' : 'Ollama')}</b> backend
+          (<code>${esc(config.base_url)}</code>) for the currently active model. Because Docker
+          isolates containers from the real host, EKAP can only report what the LLM backend
+          itself sees — it can't inspect the host's OS or GPU driver directly. Use the script
+          below on the actual host for a full check.
+        </p>
+        ${config.gpu === 'cpu' || config.gpu === 'unknown' ? `
+        <div class="gpu-warning-box">
+          ⚠ The active model does not appear to be using a GPU. If this machine has one,
+          run the setup-check script below <b>on the machine that hosts Docker/Ollama</b> —
+          it detects your OS and GPU driver setup and prints the exact commands to fix it
+          (or confirms CPU-only is expected/correct for this hardware).
+        </div>` : ''}
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h2>Run the setup-check script</h2></div>
+      <div style="padding:16px 20px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <a class="btn btn-ghost btn-sm" href="docs/gpu-setup-check.sh" download>⬇ Download setup-check script</a>
+          <span class="gpu-status-detail" style="margin:0">
+            <code>chmod +x gpu-setup-check.sh && ./gpu-setup-check.sh</code>
+          </span>
+        </div>
+        <p class="gpu-status-detail">
+          On a headless server without a browser, fetch it directly instead:
+          <code>curl -o gpu-setup-check.sh ${esc(location.origin)}/admin/docs/gpu-setup-check.sh</code>
+        </p>
+        <p class="gpu-status-detail">
+          Then paste the output below and save it — visible here to any admin, with who ran it and when.
+        </p>
+        <textarea class="input" id="gpu-diag-input" rows="8"
+          style="font-family:monospace;font-size:12px;width:100%;resize:vertical"
+          placeholder="Paste the script's output here…"></textarea>
+        <div style="margin-top:10px">
+          <button class="btn btn-primary btn-sm" id="gpu-diag-save-btn" onclick="submitGpuDiagnostics()">Save Results</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>History</h2></div>
+      ${!entries.length ? '<div class="empty"><div class="empty-icon">🖥</div><p>No results submitted yet.</p></div>' : `
+      <div style="padding:8px 20px 16px">
+        ${entries.map((e, i) => `
+          <div style="padding:12px 0;${i > 0 ? 'border-top:1px solid var(--c-border)' : ''}">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+              <div>
+                <b style="font-size:13px">${esc(e.submitted_by)}</b>
+                <span class="gpu-status-detail" style="margin:0 0 0 8px">${fmtDateTime(e.submitted_at)}</span>
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick="toggleDiagOutput('${esc(e.id)}')">View</button>
+            </div>
+            <pre id="diag-output-${esc(e.id)}" class="diag-output hidden">${esc(e.output)}</pre>
+          </div>`).join('')}
+      </div>`}
+    </div>`;
+}
+
+function toggleDiagOutput(id) {
+  q(`diag-output-${id}`).classList.toggle('hidden');
+}
+
+async function submitGpuDiagnostics() {
+  const output = q('gpu-diag-input').value.trim();
+  if (!output) { toast('Paste the script output first', 'error'); return; }
+  const btn = q('gpu-diag-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await apiFetch('/api/llm/gpu-diagnostics', { method: 'POST', body: JSON.stringify({ output }) });
+    toast('Results saved', 'success');
+    pageGpuSetup();
+  } catch(e) {
+    toast(e.message, 'error');
+    btn.disabled = false; btn.textContent = 'Save Results';
+  }
 }
 
 // Collapsed by default every time the Settings page loads — the toggles below

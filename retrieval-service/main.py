@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -618,6 +619,55 @@ async def list_llm_models(user: UserContext = Depends(get_user_context)):
     except Exception as e:
         pulling = [{"name": name, **info} for name, info in _pulling.items()]
         return {"models": [], "active": _current_model, "pulling": pulling, "error": str(e)}
+
+
+MAX_GPU_DIAGNOSTIC_LEN = 20_000  # pasted terminal output; cap so a pathological paste can't bloat the table
+
+
+@app.get("/api/llm/gpu-diagnostics")
+async def list_gpu_diagnostics(user: UserContext = Depends(get_user_context)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, submitted_by, submitted_at, output FROM gpu_diagnostics "
+                "ORDER BY submitted_at DESC LIMIT 20"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return {"entries": [
+        {"id": str(r[0]), "submitted_by": r[1], "submitted_at": r[2].isoformat(), "output": r[3]}
+        for r in rows
+    ]}
+
+
+@app.post("/api/llm/gpu-diagnostics")
+async def submit_gpu_diagnostics(request: Request, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    body = await request.json()
+    output = (body.get("output") or "").strip()
+    if not output:
+        raise HTTPException(status_code=400, detail="output is required.")
+    output = re.sub(r"\x1b\[[0-9;]*m", "", output)[:MAX_GPU_DIAGNOSTIC_LEN]
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO gpu_diagnostics (submitted_by, output) VALUES (%s, %s) "
+                "RETURNING id, submitted_at",
+                (user.username, output),
+            )
+            row_id, submitted_at = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    await audit(user.user_id, "GPU_DIAGNOSTICS_SUBMITTED", details={"id": str(row_id)})
+    return {"id": str(row_id), "submitted_by": user.username, "submitted_at": submitted_at.isoformat(), "output": output}
 
 
 def _do_pull(model: str):

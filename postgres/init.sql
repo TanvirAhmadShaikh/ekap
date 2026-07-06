@@ -366,3 +366,14 @@ BEGIN
         END LOOP;
     END IF;
 END $$;
+
+-- Admin-submitted output of scripts/gpu-setup-check.sh (run manually on the
+-- real Docker host, since containers can't see host GPU/OS — see admin-ui's
+-- "Hardware & GPU Setup" page).
+CREATE TABLE IF NOT EXISTS gpu_diagnostics (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submitted_by  TEXT NOT NULL,
+    submitted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    output        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_diagnostics_submitted_at ON gpu_diagnostics(submitted_at DESC);
