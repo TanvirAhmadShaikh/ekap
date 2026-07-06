@@ -9,9 +9,28 @@
 # Usage:
 #   chmod +x gpu-setup-check.sh
 #   ./gpu-setup-check.sh
+#
+# To paste the result into the EKAP admin UI's "Hardware & GPU Setup" page,
+# redirect to a file first so it's captured as plain text, no color codes:
+#   ./gpu-setup-check.sh > result.txt
 set -uo pipefail
 
+# Fail fast with a clear message instead of a cryptic "syntax error near
+# unexpected token" if this file got mangled in transit — e.g. copy-pasted
+# through a rich-text editor or a rendered webpage instead of downloaded as
+# raw bytes, which silently swaps straight quotes for curly ones and can
+# break the quoted heredocs below.
+if LC_ALL=C grep -qE $'\xe2\x80(\x98|\x99|\x9c|\x9d)|\r' "$0" 2>/dev/null; then
+  echo "This script's quotes/line-endings look mangled (likely copy-pasted through a" >&2
+  echo "rich-text editor instead of downloaded as raw bytes). Re-fetch it with curl:" >&2
+  echo "  curl -o gpu-setup-check.sh http://<your-ekap-host>:8080/admin/docs/gpu-setup-check.sh" >&2
+  exit 1
+fi
+
 BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; RESET='\033[0m'
+# Auto-disable when not a terminal (e.g. `> result.txt`) so pasted/redirected
+# output is clean plain text instead of raw escape sequences.
+if [ ! -t 1 ]; then BOLD=''; DIM=''; GREEN=''; YELLOW=''; RED=''; RESET=''; fi
 ok()   { echo -e "  ${GREEN}✓${RESET} $1"; }
 warn() { echo -e "  ${YELLOW}⚠${RESET} $1"; }
 bad()  { echo -e "  ${RED}✗${RESET} $1"; }

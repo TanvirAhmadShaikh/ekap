@@ -1,0 +1,14 @@
+# Force LF line endings regardless of the checkout platform's git config
+# (Windows' core.autocrlf=true otherwise silently converts these to CRLF,
+# which breaks bash heredocs — see scripts/bundle.sh, admin-ui/docs/*.sh).
+*.sh   text eol=lf
+*.py   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.conf text eol=lf
+
+# Never text-convert binaries.
+*.tar.gz binary
+*.png    binary
+*.jpg    binary
