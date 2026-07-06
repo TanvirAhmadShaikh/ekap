@@ -67,6 +67,10 @@ MAX_PDF_PAGES    = int(os.getenv("MAX_PDF_PAGES",    "500"))  # hard cap per doc
 OCR_TIMEOUT      = int(os.getenv("OCR_TIMEOUT",      "15"))  # seconds per page (tesseract fallback)
 OCR_BUDGET_SECS  = int(os.getenv("OCR_BUDGET_SECS",  "90"))  # total OCR wall-time per doc (tesseract fallback)
 OCR_JOBS         = int(os.getenv("OCR_JOBS",          "4"))   # parallel ocrmypdf workers
+# Small on purpose: onnxruntime's CPU arena grows to fit the largest batch it has
+# seen and never shrinks, so a big EMBED_BATCH here permanently inflates the
+# embedder's RSS for the life of the process, not just for this one document.
+EMBED_BATCH      = int(os.getenv("EMBED_BATCH",       "32"))
 ALLOWED_EXTENSIONS = {
     ".pdf", ".docx", ".txt", ".md", ".html", ".csv", ".xlsx", ".pptx",
     ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp",
@@ -527,8 +531,6 @@ def _process_document(document_id: str, file_path: Path, suffix: str, metadata: 
         # ── 6. Embed chunks (slowest step — scales with document size) ────────
         _set_stage(conn, document_id, "embedding_chunks")
         texts = [c["text"] for c in chunks]
-        # Embed in batches of 256 to cap peak memory — fastembed can spike on large corpora
-        EMBED_BATCH = 256
         embeddings = []
         for i in range(0, len(texts), EMBED_BATCH):
             embeddings.extend(embedder.embed(texts[i:i + EMBED_BATCH]))
