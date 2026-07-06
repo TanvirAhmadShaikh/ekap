@@ -183,39 +183,6 @@ services:
 
   # ── Frontend ───────────────────────────────────────────────────────────────
 
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    environment:
-      OPENAI_API_BASE_URL: http://retrieval-service:8000/v1
-      OPENAI_API_KEY: ekap-internal
-      WEBUI_AUTH: "true"
-      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
-      # Keycloak OIDC SSO — enabled after keycloak-setup runs
-      ENABLE_OAUTH_SIGNUP: "true"
-      OAUTH_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-ekap-web}
-      OAUTH_CLIENT_SECRET: ""
-      OPENID_PROVIDER_URL: http://keycloak:8080/auth/realms/${KEYCLOAK_REALM:-ekap}/.well-known/openid-configuration
-      OAUTH_PROVIDER_NAME: "EKAP SSO"
-      # Allow container-to-container token exchange via keycloak hostname
-    extra_hosts:
-      - "localhost:host-gateway"
-    volumes:
-      - open_webui_data:/app/backend/data
-    depends_on:
-      retrieval-service:
-        condition: service_healthy
-      keycloak-setup:
-        condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 300s
-    networks:
-      - ekap-net
-    restart: unless-stopped
-
   # ── Monitoring ─────────────────────────────────────────────────────────────
 
   prometheus:
@@ -270,8 +237,6 @@ services:
       - ./admin-ui:/usr/share/nginx/html/admin:ro
       - ./employee-portal:/usr/share/nginx/html/portal:ro
     depends_on:
-      open-webui:
-        condition: service_healthy
       keycloak:
         condition: service_healthy
     networks:
@@ -285,7 +250,6 @@ volumes:
   qdrant_data:
   vllm_models:
   uploads:
-  open_webui_data:
   prometheus_data:
   grafana_data:
 

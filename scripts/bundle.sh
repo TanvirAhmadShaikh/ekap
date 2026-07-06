@@ -91,10 +91,6 @@ if [ "$ALL_IMAGES" = true ]; then
   )
   docker save "${THIRD_PARTY[@]}" | gzip > "$BUNDLE_DIR/images-thirdparty.tar.gz"
   echo "  ✓ Third-party images: $(du -sh "$BUNDLE_DIR/images-thirdparty.tar.gz" | cut -f1)"
-
-  echo "▸ Saving Open WebUI (7 GB — this will take several minutes)…"
-  docker save "ghcr.io/open-webui/open-webui:main" | gzip > "$BUNDLE_DIR/images-openwebui.tar.gz"
-  echo "  ✓ Open WebUI: $(du -sh "$BUNDLE_DIR/images-openwebui.tar.gz" | cut -f1)"
 fi
 
 # ── 5. Runtime data volumes (optional) ───────────────────────────────────────
@@ -123,11 +119,6 @@ if [ "$WITH_DATA" = true ]; then
   echo "  grafana…"
   docker run --rm -v ekap_grafana_data:/data alpine \
     tar -czf - -C /data . > "$BUNDLE_DIR/volumes/grafana.tar.gz"
-
-  # Open WebUI data (user accounts, conversations)
-  echo "  open-webui data…"
-  docker run --rm -v ekap_open_webui_data:/data alpine \
-    tar -czf - -C /data . > "$BUNDLE_DIR/volumes/open-webui.tar.gz"
 
   echo "  ✓ Volumes exported: $(du -sh "$BUNDLE_DIR/volumes" | cut -f1)"
 fi
@@ -195,7 +186,7 @@ if [ ! -f .env ]; then
     echo "▸ Created .env from template."
     echo
     echo "  ⚠  IMPORTANT: Edit .env and set secure passwords before continuing."
-    echo "     Required fields: POSTGRES_PASSWORD, WEBUI_SECRET_KEY, KEYCLOAK_ADMIN_PASSWORD, GRAFANA_PASSWORD"
+    echo "     Required fields: POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD, GRAFANA_PASSWORD"
     echo
     read -rp "  Press Enter after editing .env to continue (Ctrl-C to abort)…"
   else
@@ -218,10 +209,6 @@ fi
 if [ -f images-thirdparty.tar.gz ]; then
   echo "▸ Loading third-party images (offline mode)…"
   gunzip -c images-thirdparty.tar.gz | docker load
-  if [ -f images-openwebui.tar.gz ]; then
-    echo "▸ Loading Open WebUI image…"
-    gunzip -c images-openwebui.tar.gz | docker load
-  fi
   echo "  ✓ All images loaded"
 else
   echo "▸ Third-party images will be pulled from the internet (postgres, qdrant, keycloak, etc.)"
@@ -235,21 +222,18 @@ if [ -d volumes ]; then
   docker volume create ekap_qdrant_data     2>/dev/null || true
   docker volume create ekap_uploads         2>/dev/null || true
   docker volume create ekap_grafana_data    2>/dev/null || true
-  docker volume create ekap_open_webui_data 2>/dev/null || true
   docker volume create ekap_prometheus_data 2>/dev/null || true
   docker volume create ekap_vllm_models     2>/dev/null || true
 
   # Restore file volumes
-  for vol in uploads qdrant grafana open-webui; do
+  for vol in uploads qdrant grafana; do
     file="volumes/${vol}.tar.gz"
     [ -f "$file" ] || continue
-    vname="ekap_${vol//-/_}_data"
     # map name → volume
     case "$vol" in
-      uploads)    vname="ekap_uploads" ;;
-      qdrant)     vname="ekap_qdrant_data" ;;
-      grafana)    vname="ekap_grafana_data" ;;
-      open-webui) vname="ekap_open_webui_data" ;;
+      uploads) vname="ekap_uploads" ;;
+      qdrant)  vname="ekap_qdrant_data" ;;
+      grafana) vname="ekap_grafana_data" ;;
     esac
     echo "  restoring $vname…"
     docker run --rm -v "$vname:/data" -i alpine tar -xzf - -C /data < "$file"
@@ -296,14 +280,13 @@ echo "════════════════════════�
 echo "  EKAP is starting up!"
 echo "════════════════════════════════════════"
 echo
-echo "  Open WebUI downloads sentence-transformers on first boot (~2 min)."
+echo "  retrieval-service downloads its embedding model on first boot (~1-2 min)."
 echo "  Check status: docker compose ps"
 echo "  View logs:    docker compose logs -f"
 echo
 echo "  Once healthy, access at:"
 echo "    Employee portal  →  http://${IP}:8080/portal/"
 echo "    Admin portal     →  http://${IP}:8080/admin/"
-echo "    Chat (OpenWebUI) →  http://${IP}:8080/"
 echo "    Keycloak admin   →  http://${IP}:8080/auth/admin"
 echo "    Grafana          →  http://${IP}:8080/grafana/"
 echo
@@ -329,7 +312,7 @@ cd ekap-bundle-*/
 
 # 2. Edit passwords
 cp .env.template .env
-nano .env          # set POSTGRES_PASSWORD, WEBUI_SECRET_KEY, etc.
+nano .env          # set POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD, etc.
 
 # 3. Run the installer
 chmod +x install.sh

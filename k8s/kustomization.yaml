@@ -10,7 +10,6 @@ resources:
   - 03-data-layer.yaml
   - 04-keycloak.yaml
   - 05-app-services.yaml
-  - 06-frontend.yaml
   - 07-monitoring.yaml
   - 08-ingress.yaml
 

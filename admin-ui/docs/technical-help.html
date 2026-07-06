@@ -49,8 +49,7 @@
       <h2>Stack</h2>
       <table class="doc-table">
         <tr><th>Layer</th><th>Technology</th><th>Role</th></tr>
-        <tr><td>Frontend (chat)</td><td>Open WebUI</td><td>End-user chat interface</td></tr>
-        <tr><td>Frontend (docs)</td><td>Employee Portal (static)</td><td>Document browsing, search, chat panel</td></tr>
+        <tr><td>Frontend (docs + chat)</td><td>Employee Portal (static)</td><td>Document browsing, search, chat panel</td></tr>
         <tr><td>Frontend (admin)</td><td>Admin Portal (static)</td><td>Document/folder/workflow/LLM management</td></tr>
         <tr><td>Auth</td><td>Keycloak</td><td>LDAP/AD, OAuth2, OIDC, MFA, group sync, SSO</td></tr>
         <tr><td>API</td><td>FastAPI</td><td>Retrieval orchestration, security enforcement, audit logging</td></tr>
@@ -65,7 +64,7 @@
 
     <section id="architecture">
       <h2>Architecture Flow</h2>
-      <pre><code>Users → NGINX → Open WebUI → FastAPI Gateway (retrieval-service)
+      <pre><code>Users → NGINX → Employee Portal (chat panel) → FastAPI Gateway (retrieval-service)
                               → Retrieval Router
                                   → Vector (Qdrant)
                                   → Hierarchical (Doc→Chapter→Section→Chunk)
@@ -74,7 +73,8 @@
                               → Context Builder → vLLM → Response (with citations)</code></pre>
       <p>The Admin Portal and Employee Portal are separate static SPAs served by NGINX
       alongside the proxied services; they call <code>ingestion-service</code> and
-      <code>retrieval-service</code> directly over <code>/api/*</code>.</p>
+      <code>retrieval-service</code> directly over <code>/api/*</code> and
+      <code>/v1/chat/completions</code>.</p>
     </section>
 
     <section id="services">
@@ -82,7 +82,6 @@
       <p>Defined in <code>docker-compose.yml</code>, on the shared <code>ekap-net</code> network:</p>
       <ul>
         <li><strong>nginx</strong> — single entrypoint, TLS termination, routing, static hosting for admin-ui and employee-portal.</li>
-        <li><strong>open-webui</strong> — chat frontend; talks to <code>retrieval-service</code> as an OpenAI-compatible backend; OIDC SSO via Keycloak.</li>
         <li><strong>keycloak</strong> + <strong>keycloak-setup</strong> — identity provider; the setup container bootstraps the <code>ekap</code> realm and <code>ekap-web</code> client on first run.</li>
         <li><strong>postgres</strong> — metadata DB backing both the app and Keycloak's own store.</li>
         <li><strong>qdrant</strong> — vector index for embeddings.</li>
@@ -174,7 +173,7 @@
         <tr><td><code>/v1/*</code></td><td>retrieval-service (OpenAI-compatible)</td></tr>
         <tr><td><code>/api/(query|conversations|feedback|llm)</code></td><td>retrieval-service</td></tr>
         <tr><td><code>/grafana/</code></td><td>Grafana</td></tr>
-        <tr><td><code>/</code> (catch-all)</td><td>Open WebUI</td></tr>
+        <tr><td><code>/</code> (exact)</td><td>302 redirect → <code>/portal/</code></td></tr>
       </table>
       <p>Rate limiting zones: <code>api</code> (60 req/min per IP) and <code>upload</code>
       (10 req/min per IP, stricter due to upload cost).</p>
@@ -192,7 +191,6 @@
         <li><code>03-data-layer.yaml</code> — Postgres, Qdrant</li>
         <li><code>04-keycloak.yaml</code></li>
         <li><code>05-app-services.yaml</code> — retrieval-service, ingestion-service</li>
-        <li><code>06-frontend.yaml</code> — open-webui, admin-ui, employee-portal</li>
         <li><code>07-monitoring.yaml</code> — Prometheus, Grafana</li>
         <li><code>08-ingress.yaml</code></li>
       </ul>

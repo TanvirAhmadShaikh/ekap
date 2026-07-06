@@ -66,9 +66,8 @@ spec:
               service:
                 name: grafana
                 port: {number: 3000}
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: open-webui
-                port: {number: 8080}
+          # NOTE: no default "/" backend — these manifests have no service serving
+          # the static admin-ui/employee-portal assets (docker-compose serves them
+          # via nginx bind mounts; a k8s equivalent, e.g. an nginx Deployment fronting
+          # a ConfigMap or baked-in image of admin-ui/employee-portal, still needs to
+          # be added here).
