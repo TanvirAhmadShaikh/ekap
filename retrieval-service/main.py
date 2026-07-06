@@ -25,8 +25,11 @@ LLM_MODEL           = os.getenv("LLM_MODEL", "ekap-llm")
 
 # Runtime-mutable model selection (resets to LLM_MODEL on container restart)
 _current_model: str = LLM_MODEL
-_show_model_name: bool = True
-_pulling: set[str]  = set()
+_show_model_name: bool = False
+_show_stats: bool = False   # strategy/chunks/model/GPU-CPU line
+_show_timing: bool = False  # ⏱ time-taken line
+_pulling: dict[str, dict] = {}
+_cancel_pull: set[str] = set()
 # Ollama management API base (strip /v1 suffix used by OpenAI-compat path)
 OLLAMA_BASE: str    = LLM_BASE_URL.rstrip("/").removesuffix("/v1")
 COLLECTION_NAME     = "ekap_chunks"
@@ -37,22 +40,27 @@ RRF_K               = 60
 SMALL_DOC_MAX       = 50
 MEDIUM_DOC_MAX      = 300
 
+# Deliberately has no per-query content (no {context} placeholder) — kept 100%
+# identical across every turn and every conversation so it forms a stable,
+# cacheable prefix (vLLM prefix caching / llama.cpp context-shift). Retrieved
+# context instead gets attached to the latest user turn (see chat_completions),
+# since that's the only part of the prompt that's actually new each turn.
 SYSTEM_PROMPT = (
     "You are EKAP, an enterprise knowledge assistant. "
-    "Answer the user's question using ONLY the information explicitly stated in the context below. "
-    "Cite sources inline as [Source N].\n\n"
+    "Answer the user's question using ONLY the information explicitly stated in the context "
+    "provided with their latest message. Cite sources inline as [Source N].\n\n"
     "Important rules:\n"
     "- If the context contains only a table of contents, index entries, or page-number references "
     "(e.g. 'Chapter 5 ... 42', 'TRICEPS TRAINING 410'), treat it as if no useful content was found "
     "and tell the user the document has not been fully indexed yet.\n"
     "- Never infer, guess, or expand on what a source *might* say beyond what is explicitly quoted.\n"
     "- If the answer is genuinely not present in the context, say exactly: "
-    "\"I don't have that information in the knowledge base.\"\n\n"
-    "Context:\n{context}"
+    "\"I don't have that information in the knowledge base.\""
 )
 
 qdrant: QdrantClient = None
 embedder: TextEmbedding = None
+llm_client: httpx.AsyncClient = None
 
 query_counter = Counter("ekap_queries_total", "Total queries", ["status"])
 query_latency = Histogram("ekap_query_latency_seconds", "Query latency")
@@ -60,10 +68,16 @@ query_latency = Histogram("ekap_query_latency_seconds", "Query latency")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global qdrant, embedder
+    global qdrant, embedder, llm_client
     qdrant   = QdrantClient(QDRANT_URL)
     embedder = TextEmbedding(EMBEDDING_MODEL)
+    # Shared across requests — a fresh AsyncClient per request meant a new TCP
+    # connection to Ollama/vLLM on every single chat message.
+    llm_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
+    )
     yield
+    await llm_client.aclose()
 
 
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "false").lower() == "true"
@@ -330,17 +344,37 @@ async def _stub_stream(cid: str, answer: str):
     yield "data: [DONE]\n\n"
 
 
-async def stream_llm(messages: list[dict], cid: str, citations: list[dict]):
+async def _gpu_status() -> str:
+    """gpu | gpu-partial | cpu | unknown, for the active model's *last* inference."""
+    if "vllm" in LLM_BASE_URL:
+        # vLLM's docker-compose profile reserves an nvidia GPU to even start.
+        return "gpu"
     try:
-        # connect: time to open the socket; read: time to wait for the next token (large for slow CPU)
-        _timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
-        async with httpx.AsyncClient(timeout=_timeout) as client:
-            async with client.stream("POST", f"{LLM_BASE_URL}/chat/completions",
-                                     json={"model": _current_model, "messages": messages, "stream": True}) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if line:
-                        yield line + "\n\n"
+        resp = await llm_client.get(f"{OLLAMA_BASE}/api/ps", timeout=3.0)
+        resp.raise_for_status()
+        data = resp.json()
+        for m in data.get("models", []):
+            if m.get("model") == _current_model or m.get("name") == _current_model:
+                size = m.get("size", 0)
+                vram = m.get("size_vram", 0)
+                if size and vram >= size * 0.98:
+                    return "gpu"
+                return "gpu-partial" if vram > 0 else "cpu"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+async def stream_llm(messages: list[dict], cid: str, citations: list[dict], strategy: str, chunk_count: int):
+    try:
+        payload = {"model": _current_model, "messages": messages, "stream": True}
+        if "vllm" not in LLM_BASE_URL:
+            payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
+        async with llm_client.stream("POST", f"{LLM_BASE_URL}/chat/completions", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line:
+                    yield line + "\n\n"
     except Exception as _exc:
         n = len(citations)
         srcs = ", ".join(f"\"{c['document_title']}\" p.{c['page_number']}" for c in citations[:3])
@@ -358,6 +392,17 @@ async def stream_llm(messages: list[dict], cid: str, citations: list[dict]):
             )
         async for chunk in _stub_stream(cid, stub):
             yield chunk
+
+    # Non-OpenAI-standard trailing event — our own Employee Portal reads this for
+    # the "(strategy · N chunks · model)" stats bracket under each reply. Placed
+    # after the try/except (not in a `finally`) — yielding from `finally` during
+    # generator close (e.g. client disconnects mid-stream) raises "async generator
+    # ignored GeneratorExit"; this way it only runs on a normal, watched completion.
+    stats = {
+        "strategy": strategy, "chunks": chunk_count, "model": _current_model,
+        "gpu": await _gpu_status(), "citations": citations,
+    }
+    yield f"data: {json.dumps({'ekap_stats': stats})}\n\n"
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -398,12 +443,17 @@ async def chat_completions(request: Request, user: UserContext = Depends(get_use
     chunks, strategy  = retrieve(user_question, permitted_ids)
     context, citations = build_context(chunks)
 
-    augmented = [
-        {"role": "system", "content": SYSTEM_PROMPT.format(
-            context=context or "No relevant documents found in the knowledge base."
-        )},
-        *[m for m in messages if m.get("role") != "system"],
-    ]
+    # Context goes on the latest user turn, not the system message — keeps the
+    # system prompt + prior turns byte-identical across the conversation so the
+    # LLM backend can reuse cached prefill for everything except the new turn.
+    history = [m for m in messages if m.get("role") != "system"]
+    context_block = context or "No relevant documents found in the knowledge base."
+    if history and history[-1].get("role") == "user":
+        history = history[:-1] + [{
+            "role": "user",
+            "content": f"Context:\n{context_block}\n\nQuestion: {history[-1]['content']}",
+        }]
+    augmented = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
 
     # ── Audit ────────────────────────────────────────────────────────────────
     await audit(user.user_id, "QUERY", details={
@@ -419,14 +469,15 @@ async def chat_completions(request: Request, user: UserContext = Depends(get_use
     query_latency.observe(time.perf_counter() - t0)
 
     if do_stream:
-        return StreamingResponse(stream_llm(augmented, cid, citations), media_type="text/event-stream")
+        return StreamingResponse(stream_llm(augmented, cid, citations, strategy, len(chunks)), media_type="text/event-stream")
 
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(f"{LLM_BASE_URL}/chat/completions",
-                                     json={"model": _current_model, "messages": augmented, "stream": False})
-            resp.raise_for_status()
-            answer = resp.json()["choices"][0]["message"]["content"]
+        payload = {"model": _current_model, "messages": augmented, "stream": False}
+        if "vllm" not in LLM_BASE_URL:
+            payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
+        resp = await llm_client.post(f"{LLM_BASE_URL}/chat/completions", json=payload)
+        resp.raise_for_status()
+        answer = resp.json()["choices"][0]["message"]["content"]
     except Exception:
         answer = f"[LLM unavailable] Retrieved {len(citations)} chunk(s) via {strategy}."
 
@@ -498,6 +549,8 @@ async def get_llm_config(user: UserContext = Depends(get_user_context)):
         "env_model":        LLM_MODEL,
         "base_url":         LLM_BASE_URL,
         "show_model_name":  _show_model_name,
+        "show_stats":       _show_stats,
+        "show_timing":      _show_timing,
     }
 
 
@@ -506,7 +559,7 @@ async def set_llm_config(request: Request, user: UserContext = Depends(get_user_
     from fastapi import HTTPException
     if not user.can_manage_documents():
         raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
-    global _current_model, _show_model_name
+    global _current_model, _show_model_name, _show_stats, _show_timing
     body = await request.json()
 
     if "model" in body:
@@ -520,7 +573,18 @@ async def set_llm_config(request: Request, user: UserContext = Depends(get_user_
         _show_model_name = bool(body["show_model_name"])
         await audit(user.user_id, "LLM_CONFIG_CHANGE", details={"show_model_name": _show_model_name})
 
-    return {"model": _current_model, "show_model_name": _show_model_name, "status": "updated"}
+    if "show_stats" in body:
+        _show_stats = bool(body["show_stats"])
+        await audit(user.user_id, "LLM_CONFIG_CHANGE", details={"show_stats": _show_stats})
+
+    if "show_timing" in body:
+        _show_timing = bool(body["show_timing"])
+        await audit(user.user_id, "LLM_CONFIG_CHANGE", details={"show_timing": _show_timing})
+
+    return {
+        "model": _current_model, "show_model_name": _show_model_name,
+        "show_stats": _show_stats, "show_timing": _show_timing, "status": "updated",
+    }
 
 
 @app.get("/api/llm/models")
@@ -532,23 +596,65 @@ async def list_llm_models(user: UserContext = Depends(get_user_context)):
             data = resp.json()
         models = [
             {
-                "name":        m["name"],
-                "size":        m.get("size", 0),
-                "modified_at": m.get("modified_at", ""),
+                "name":          m["name"],
+                "size":          m.get("size", 0),
+                "modified_at":   m.get("modified_at", ""),
+                "quantization":  m.get("details", {}).get("quantization_level", ""),
             }
             for m in data.get("models", [])
         ]
-        return {"models": models, "active": _current_model, "pulling": list(_pulling)}
+        pulling = [{"name": name, **info} for name, info in _pulling.items()]
+        return {"models": models, "active": _current_model, "pulling": pulling}
     except Exception as e:
-        return {"models": [], "active": _current_model, "pulling": list(_pulling), "error": str(e)}
+        pulling = [{"name": name, **info} for name, info in _pulling.items()]
+        return {"models": [], "active": _current_model, "pulling": pulling, "error": str(e)}
 
 
 def _do_pull(model: str):
+    # Ollama streams progress per-layer (weights, manifest, config, ...), each
+    # with its own "total" — a model's small trailing layers would otherwise
+    # make the reported size shrink after the big weights layer finishes.
+    # Track the largest "total" seen so far as a stable overall download size.
+    model_size = 0
     try:
-        with httpx.Client(timeout=600.0) as client:
-            client.post(f"{OLLAMA_BASE}/api/pull", json={"name": model, "stream": False})
+        with httpx.Client(timeout=None) as client:
+            with client.stream("POST", f"{OLLAMA_BASE}/api/pull", json={"name": model, "stream": True}) as resp:
+                for line in resp.iter_lines():
+                    if model in _cancel_pull:
+                        break  # closes the connection on `with` exit, aborting Ollama's download too
+                    if not line:
+                        continue
+                    try:
+                        evt = json.loads(line)
+                    except ValueError:
+                        continue
+                    if evt.get("error"):
+                        _pulling[model] = {"status": "error", "error": evt["error"], "percent": None}
+                        return
+                    total      = evt.get("total", 0)
+                    completed  = evt.get("completed", 0)
+                    model_size = max(model_size, total)
+                    percent    = round(completed / total * 100, 1) if total else None
+                    _pulling[model] = {
+                        "status":     evt.get("status", ""),
+                        "completed":  completed,
+                        "total":      total,
+                        "model_size": model_size,
+                        "percent":    percent,
+                    }
+        # Streamed to completion without an explicit error — model now shows up
+        # via Ollama's /api/tags, so drop it from the in-progress list.
+        _pulling.pop(model, None)
+    except Exception as e:
+        # Breaking out of the loop above closes the stream mid-read, which can
+        # itself raise (e.g. a read error) — don't let that clobber a clean
+        # cancellation with a spurious "error" status.
+        if model in _cancel_pull:
+            _pulling.pop(model, None)
+        else:
+            _pulling[model] = {"status": "error", "error": str(e), "percent": None}
     finally:
-        _pulling.discard(model)
+        _cancel_pull.discard(model)
 
 
 @app.post("/api/llm/pull")
@@ -564,7 +670,50 @@ async def pull_model(
     model = body.get("model", "").strip()
     if not model:
         raise HTTPException(status_code=400, detail="model is required.")
-    _pulling.add(model)
+    # Different models pull fully in parallel (each gets its own background task);
+    # this only guards against double-starting the same model's pull.
+    if model in _pulling and _pulling[model].get("status") != "error":
+        return {"status": "pulling", "model": model}
+    _pulling[model] = {"status": "starting", "completed": 0, "total": 0, "model_size": 0, "percent": 0}
     background_tasks.add_task(_do_pull, model)
     await audit(user.user_id, "LLM_PULL", details={"model": model})
     return {"status": "pulling", "model": model}
+
+
+@app.post("/api/llm/pull/cancel")
+async def cancel_pull(request: Request, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    body  = await request.json()
+    model = body.get("model", "").strip()
+    if model not in _pulling:
+        raise HTTPException(status_code=404, detail=f'"{model}" is not currently pulling.')
+    if _pulling[model].get("status") == "error":
+        # Already finished (failed) — no background task left to cancel, just
+        # dismiss the entry so it stops showing in the Installed Models list.
+        _pulling.pop(model, None)
+        await audit(user.user_id, "LLM_PULL_DISMISS", details={"model": model})
+        return {"status": "dismissed", "model": model}
+    _cancel_pull.add(model)
+    await audit(user.user_id, "LLM_PULL_CANCEL", details={"model": model})
+    return {"status": "cancelling", "model": model}
+
+
+@app.delete("/api/llm/models/{name:path}")
+async def delete_model(name: str, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    if name == _current_model:
+        raise HTTPException(status_code=400, detail="Cannot remove the active model. Activate a different model first.")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request("DELETE", f"{OLLAMA_BASE}/api/delete", json={"name": name})
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Ollama error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    await audit(user.user_id, "LLM_DELETE", details={"model": name})
+    return {"status": "deleted", "model": name}

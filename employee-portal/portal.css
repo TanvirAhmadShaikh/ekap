@@ -255,6 +255,15 @@ body { background: var(--c-bg); color: var(--c-text); font-size: 14px; line-heig
   border-radius: 5px; padding: 3px 8px;
 }
 .chat-source-num { font-weight: 700; color: var(--c-primary); }
+.chat-source-clickable { cursor: pointer; }
+.chat-source-clickable:hover { border-color: var(--c-primary); background: #eff6ff; }
+
+/* inline [Source N] markers within a streamed reply */
+.chat-citation-ref {
+  cursor: pointer; color: var(--c-primary); font-weight: 600;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px;
+}
+.chat-citation-ref:hover { text-decoration-style: solid; }
 
 /* timing */
 .chat-timing { font-size: 10.5px; color: var(--c-muted); margin-top: 3px; padding: 0 2px; }

@@ -184,6 +184,7 @@ const PAGES = {
 
 async function router() {
   clearTimeout(_pollTimer);
+  clearTimeout(_settingsTimer);
   const hash = location.hash.slice(1) || '/dashboard';
   const [path] = hash.split('?');
   document.querySelectorAll('.nav-item').forEach(a =>
@@ -1175,21 +1176,138 @@ async function undelete(id, title) {
 /* ── LLM Settings ───────────────────────────────────────────────────────────── */
 let _settingsTimer = null;
 
+// quantBase = the real Ollama tag a quant suffix actually resolves against for
+// this model — verified directly against the registry (2026-07-06). Plain
+// suffix-appending to `name` fails for every one of these; most need
+// "-instruct-" inserted, and phi3.5/deepseek-r1 use their own naming entirely.
+// quantLevels (optional) = which of QUANT_LEVELS' values this model actually
+// publishes — omit to allow all of them. Every model here has all 5 except
+// deepseek-r1, which only publishes q4_K_M/q8_0/fp16 (verified against the
+// registry; q4_0 and q5_K_M 404 for this specific model).
 const POPULAR_MODELS = [
-  { name: 'llama3.2:1b',      label: 'Llama 3.2 1B',     size: '0.8 GB', note: 'Fastest' },
-  { name: 'llama3.2:3b',      label: 'Llama 3.2 3B',     size: '2.0 GB', note: 'Recommended' },
-  { name: 'phi3.5',           label: 'Phi-3.5 Mini',     size: '2.2 GB', note: 'Best reasoning' },
-  { name: 'gemma2:2b',        label: 'Gemma 2 2B',       size: '1.6 GB', note: '' },
-  { name: 'qwen2.5:1.5b',     label: 'Qwen 2.5 1.5B',   size: '1.0 GB', note: '' },
-  { name: 'qwen2.5:3b',       label: 'Qwen 2.5 3B',      size: '2.0 GB', note: '' },
-  { name: 'mistral:7b',       label: 'Mistral 7B',       size: '4.1 GB', note: 'Higher quality' },
-  { name: 'deepseek-r1:1.5b', label: 'DeepSeek-R1 1.5B', size: '1.1 GB', note: 'Reasoning' },
+  { name: 'llama3.2:1b',      label: 'Llama 3.2 1B',     size: '0.8 GB', note: 'Fastest',       quantBase: 'llama3.2:1b-instruct' },
+  { name: 'llama3.2:3b',      label: 'Llama 3.2 3B',     size: '2.0 GB', note: 'Recommended',    quantBase: 'llama3.2:3b-instruct' },
+  { name: 'phi3.5',           label: 'Phi-3.5 Mini',     size: '2.2 GB', note: 'Best reasoning', quantBase: 'phi3.5:3.8b-mini-instruct' },
+  { name: 'gemma2:2b',        label: 'Gemma 2 2B',       size: '1.6 GB', note: '',               quantBase: 'gemma2:2b-instruct' },
+  { name: 'qwen2.5:1.5b',     label: 'Qwen 2.5 1.5B',   size: '1.0 GB', note: '',                quantBase: 'qwen2.5:1.5b-instruct' },
+  { name: 'qwen2.5:3b',       label: 'Qwen 2.5 3B',      size: '2.0 GB', note: '',               quantBase: 'qwen2.5:3b-instruct' },
+  { name: 'mistral:7b',       label: 'Mistral 7B',       size: '4.1 GB', note: 'Higher quality', quantBase: 'mistral:7b-instruct' },
+  { name: 'deepseek-r1:1.5b', label: 'DeepSeek-R1 1.5B', size: '1.1 GB', note: 'Reasoning',      quantBase: 'deepseek-r1:1.5b-qwen-distill',
+    quantLevels: ['q4_K_M', 'q8_0', 'fp16'] },
+];
+
+// Ollama tags encode quantization as a suffix (e.g. llama3.2:3b-instruct-q4_0).
+// Not every model publishes every level — an unknown tag just fails the pull.
+const QUANT_LEVELS = [
+  { value: '',        label: 'Default (as tagged)' },
+  { value: 'q4_0',    label: 'Q4_0 — smallest, fastest' },
+  { value: 'q4_K_M',  label: 'Q4_K_M — balanced (recommended)' },
+  { value: 'q5_K_M',  label: 'Q5_K_M — higher quality' },
+  { value: 'q8_0',    label: 'Q8_0 — larger, near-lossless' },
+  { value: 'fp16',    label: 'FP16 — full precision, largest' },
 ];
 
 function fmtBytes(b) {
   if (!b) return '';
   const gb = b / 1e9;
   return gb >= 1 ? gb.toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB';
+}
+
+function renderPullingRow(p) {
+  if (p.status === 'error') {
+    return `<div class="llm-model-row">
+      <div class="llm-model-info">
+        <span class="llm-model-name">${esc(p.name)}</span>
+        <span class="llm-model-size" style="color:var(--c-danger)">⚠ ${esc(p.error || 'Pull failed')}</span>
+      </div>
+      <span style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-primary" onclick="fillPullInput('${esc(p.name)}')">Retry</button>
+        <button class="btn btn-sm btn-danger" onclick="cancelPull('${esc(p.name)}')">Remove</button>
+      </span>
+    </div>`;
+  }
+  const pct   = p.percent ?? 0;
+  const stage = (p.status || 'starting').replace(/^pulling /, 'downloading ');
+  return `<div class="llm-model-row" style="flex-direction:column;align-items:stretch;gap:6px">
+    <div class="llm-model-info">
+      <span class="llm-model-name">${esc(p.name)}</span>
+      ${p.model_size ? `<span class="llm-model-size">${fmtBytes(p.model_size)}</span>` : ''}
+      <span class="badge badge-processing">Pulling</span>
+    </div>
+    <div class="proc-wrap" style="min-width:0">
+      <div class="proc-bar-track">
+        <div class="proc-bar-fill" style="width:${pct}%"></div>
+      </div>
+      <div class="proc-meta">
+        <span class="proc-stage">${esc(stage)}</span>
+        <span style="display:flex;align-items:center;gap:6px">
+          <span class="proc-time">${p.percent != null ? pct.toFixed(0) + '%' : ''}</span>
+          <button class="btn btn-xs btn-danger" onclick="cancelPull('${esc(p.name)}')">✕ Stop</button>
+        </span>
+      </div>
+    </div>
+  </div>`;
+}
+
+function modelRowHTML(m, active) {
+  return `<div class="llm-model-row ${m.name === active ? 'llm-model-row-active' : ''}">
+    <div class="llm-model-info">
+      <span class="llm-model-name">${esc(m.name)}${m.quantization ? ` <span class="llm-model-quant">(${esc(m.quantization)})</span>` : ''}</span>
+      ${fmtBytes(m.size) ? `<span class="llm-model-size">${fmtBytes(m.size)}</span>` : ''}
+    </div>
+    <div style="display:flex;gap:6px;align-items:center">
+      ${m.name === active
+        ? `<span class="badge badge-published">Active</span>`
+        : `<button class="btn btn-sm btn-primary"
+             onclick="activateModel('${esc(m.name)}')">Activate</button>`}
+      <button class="btn btn-sm btn-danger" title="Remove model" ${m.name === active ? 'disabled' : ''}
+        onclick="removeModel('${esc(m.name)}')">Remove</button>
+    </div>
+  </div>`;
+}
+
+function modelsListBodyHTML(modelsData) {
+  const models  = modelsData.models  || [];
+  const pulling = modelsData.pulling || [];
+  const active  = modelsData.active;
+  // Active model always first, with a visual break before the rest — so it
+  // doesn't get lost among whatever order Ollama happens to return the list in.
+  const activeModel = models.find(m => m.name === active);
+  const otherModels = models.filter(m => m.name !== active);
+  return `
+    ${modelsData.error ? `<div style="padding:12px 20px;font-size:12.5px;color:var(--c-danger)">
+      ⚠ Could not reach Ollama: ${esc(modelsData.error)}
+    </div>` : ''}
+    ${!models.length && !pulling.length
+      ? '<div class="empty"><div class="empty-icon">🤖</div><p>No models installed. Pull one below.</p></div>'
+      : `<div style="padding:4px 12px">
+          ${activeModel ? modelRowHTML(activeModel, active) : ''}
+          ${activeModel && (otherModels.length || pulling.length) ? '<div class="llm-model-separator"></div>' : ''}
+          ${otherModels.map(m => modelRowHTML(m, active)).join('')}
+          ${pulling.map(p => renderPullingRow(p)).join('')}
+        </div>`}`;
+}
+
+// Poll only while the Settings page is still the one showing, so a background
+// pull never yanks the user back here after they've navigated elsewhere.
+function scheduleModelsPoll() {
+  clearTimeout(_settingsTimer);
+  _settingsTimer = setTimeout(refreshModelsList, 1200);
+}
+
+async function refreshModelsList() {
+  if ((location.hash.split('?')[0] || '#/dashboard') !== '#/settings') return;
+  const body = q('models-list-body');
+  if (!body) return;
+  let modelsData;
+  try {
+    modelsData = await apiFetch('/api/llm/models');
+  } catch {
+    scheduleModelsPoll();
+    return;
+  }
+  body.innerHTML = modelsListBodyHTML(modelsData);
+  if ((modelsData.pulling || []).length) scheduleModelsPoll();
 }
 
 async function pageSettings() {
@@ -1205,7 +1323,6 @@ async function pageSettings() {
     return;
   }
 
-  const models  = modelsData.models  || [];
   const pulling = modelsData.pulling || [];
   const active  = config.model;
   const matchesEnv = active === config.env_model;
@@ -1228,18 +1345,52 @@ async function pageSettings() {
           To make permanent, set <code>OLLAMA_MODEL=${esc(active)}</code> in your <code>.env</code>
           and run <code>docker compose up -d retrieval-service</code>.
         </p>
-        <div class="llm-toggle-row">
-          <label class="switch">
-            <input type="checkbox" id="show-model-toggle"
-                   ${config.show_model_name ? 'checked' : ''}
-                   onchange="toggleShowModelName(this.checked)">
-            <span class="switch-slider"></span>
-          </label>
-          <div>
-            <div class="llm-toggle-label">Show model name in chat header</div>
-            <div class="llm-toggle-sub">
-              When on, the Employee Portal's AI Assistant panel shows the active model name
-              (e.g. "${esc(active)}") next to "Answers from the knowledge base".
+        <div class="llm-advanced-header" onclick="toggleChatDisplaySettings()">
+          <span id="chat-display-caret" class="llm-advanced-caret">▸</span> Chat display settings
+        </div>
+        <div id="chat-display-settings" class="hidden">
+          <div class="llm-toggle-row">
+            <label class="switch">
+              <input type="checkbox" id="show-model-toggle"
+                     ${config.show_model_name ? 'checked' : ''}
+                     onchange="toggleShowModelName(this.checked)">
+              <span class="switch-slider"></span>
+            </label>
+            <div>
+              <div class="llm-toggle-label">Show model name in chat header</div>
+              <div class="llm-toggle-sub">
+                When on, the Employee Portal's AI Assistant panel shows the active model name
+                (e.g. "${esc(active)}") next to "Answers from the knowledge base".
+              </div>
+            </div>
+          </div>
+          <div class="llm-toggle-row">
+            <label class="switch">
+              <input type="checkbox" id="show-stats-toggle"
+                     ${config.show_stats ? 'checked' : ''}
+                     onchange="toggleShowStats(this.checked)">
+              <span class="switch-slider"></span>
+            </label>
+            <div>
+              <div class="llm-toggle-label">Show response stats</div>
+              <div class="llm-toggle-sub">
+                When on, each reply in the Employee Portal shows retrieval strategy, chunk count,
+                model, and GPU/CPU underneath it.
+              </div>
+            </div>
+          </div>
+          <div class="llm-toggle-row">
+            <label class="switch">
+              <input type="checkbox" id="show-timing-toggle"
+                     ${config.show_timing ? 'checked' : ''}
+                     onchange="toggleShowTiming(this.checked)">
+              <span class="switch-slider"></span>
+            </label>
+            <div>
+              <div class="llm-toggle-label">Show time taken</div>
+              <div class="llm-toggle-sub">
+                When on, each reply in the Employee Portal shows how long it took to respond.
+              </div>
             </div>
           </div>
         </div>
@@ -1251,34 +1402,7 @@ async function pageSettings() {
         <h2>Installed Models</h2>
         <button class="btn btn-ghost btn-sm" onclick="pageSettings()">↺ Refresh</button>
       </div>
-      ${modelsData.error ? `<div style="padding:12px 20px;font-size:12.5px;color:var(--c-danger)">
-        ⚠ Could not reach Ollama: ${esc(modelsData.error)}
-      </div>` : ''}
-      ${!models.length && !pulling.length
-        ? '<div class="empty"><div class="empty-icon">🤖</div><p>No models installed. Pull one below.</p></div>'
-        : `<div style="padding:4px 12px">
-            ${models.map(m => `
-              <div class="llm-model-row ${m.name === active ? 'llm-model-row-active' : ''}">
-                <div class="llm-model-info">
-                  <span class="llm-model-name">${esc(m.name)}</span>
-                  ${fmtBytes(m.size) ? `<span class="llm-model-size">${fmtBytes(m.size)}</span>` : ''}
-                </div>
-                <div>
-                  ${m.name === active
-                    ? `<span class="badge badge-published">Active</span>`
-                    : `<button class="btn btn-sm btn-primary"
-                         onclick="activateModel('${esc(m.name)}')">Activate</button>`}
-                </div>
-              </div>`).join('')}
-            ${pulling.map(p => `
-              <div class="llm-model-row">
-                <div class="llm-model-info">
-                  <span class="llm-model-name">${esc(p)}</span>
-                  <span class="llm-model-size">downloading…</span>
-                </div>
-                <span class="badge badge-processing">Pulling</span>
-              </div>`).join('')}
-          </div>`}
+      <div id="models-list-body">${modelsListBodyHTML(modelsData)}</div>
     </div>
 
     <div class="card">
@@ -1297,24 +1421,54 @@ async function pageSettings() {
           </div>
         </div>
         <div style="display:flex;gap:8px">
-          <input class="input" id="pull-input" placeholder="e.g. llama3.2:3b" style="flex:1">
+          <input class="input" id="pull-input" placeholder="e.g. llama3.2:3b" style="flex:1" oninput="updateQuantOptions()">
+          <select class="input" id="pull-quant" style="flex:0 0 auto;width:auto">
+            ${QUANT_LEVELS.map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('')}
+          </select>
           <button class="btn btn-primary" id="pull-btn" onclick="doPull()">Pull Model</button>
         </div>
         <p style="font-size:12px;color:var(--c-muted)">
           The pull runs on the host Ollama instance. First download may take several minutes depending on model size.
-          The list above refreshes automatically.
+          The list above refreshes automatically. For the models above, the quantization dropdown only offers levels
+          verified to exist for that model. For anything else you type, quantization appends a guessed tag suffix —
+          smaller/faster but lower quality — which may not exist for every model; check the exact tag on
+          <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a> if a pull fails
+          with "manifest does not exist".
         </p>
       </div>
     </div>`;
 
-  if (pulling.length) {
-    _settingsTimer = setTimeout(pageSettings, 3000);
-  }
+  if (pulling.length) scheduleModelsPoll();
+}
+
+// Collapsed by default every time the Settings page loads — the toggles below
+// are occasional/debug-facing, not something an admin needs open every visit.
+function toggleChatDisplaySettings() {
+  q('chat-display-settings').classList.toggle('hidden');
+  const caret = q('chat-display-caret');
+  caret.textContent = caret.textContent === '▸' ? '▾' : '▸';
 }
 
 function fillPullInput(name) {
   q('pull-input').value = name;
   q('pull-input').focus();
+  updateQuantOptions();
+}
+
+// Restricts the quant dropdown to levels actually published for the currently
+// typed/selected model (see POPULAR_MODELS.quantLevels); shows all of them for
+// anything not in the curated list, since we don't know its real availability.
+function updateQuantOptions() {
+  const select = q('pull-quant');
+  if (!select) return;
+  const rawName = (q('pull-input')?.value || '').trim();
+  const known    = POPULAR_MODELS.find(m => m.name === rawName);
+  const allowed  = known?.quantLevels || null;
+  const current  = select.value;
+  select.innerHTML = QUANT_LEVELS
+    .filter(o => !o.value || !allowed || allowed.includes(o.value))
+    .map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+  if ([...select.options].some(o => o.value === current)) select.value = current;
 }
 
 async function activateModel(name) {
@@ -1324,6 +1478,26 @@ async function activateModel(name) {
       body: JSON.stringify({ model: name }),
     });
     toast(`Active model switched to "${name}"`, 'success');
+    pageSettings();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function removeModel(name) {
+  if (!confirm(`Remove model "${name}"? It will be deleted from disk — pull it again to use it later.`)) return;
+  try {
+    await apiFetch(`/api/llm/models/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    toast(`Removed "${name}"`, 'success');
+    pageSettings();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function cancelPull(name) {
+  try {
+    const res = await apiFetch('/api/llm/pull/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ model: name }),
+    });
+    toast(res.status === 'dismissed' ? `Removed "${name}"` : `Cancelling pull of "${name}"…`, 'info');
     pageSettings();
   } catch(e) { toast(e.message, 'error'); }
 }
@@ -1345,9 +1519,62 @@ async function toggleShowModelName(checked) {
   }
 }
 
+async function toggleShowStats(checked) {
+  const toggle = q('show-stats-toggle');
+  toggle.disabled = true;
+  try {
+    await apiFetch('/api/llm/config', {
+      method: 'POST',
+      body: JSON.stringify({ show_stats: checked }),
+    });
+    toast(checked ? 'Response stats will be shown in chat' : 'Response stats hidden in chat', 'success');
+  } catch(e) {
+    toggle.checked = !checked;
+    toast(e.message, 'error');
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
+async function toggleShowTiming(checked) {
+  const toggle = q('show-timing-toggle');
+  toggle.disabled = true;
+  try {
+    await apiFetch('/api/llm/config', {
+      method: 'POST',
+      body: JSON.stringify({ show_timing: checked }),
+    });
+    toast(checked ? 'Time taken will be shown in chat' : 'Time taken hidden in chat', 'success');
+  } catch(e) {
+    toggle.checked = !checked;
+    toast(e.message, 'error');
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
+// Fallback for names not in POPULAR_MODELS (which carries verified exact tags
+// instead — see quantBase above). Most Ollama instruct/chat models tag their
+// quantized variants as "...-instruct-<quant>", not a bare "-<quant>" suffix
+// (verified: 0/8 popular models resolved with a bare suffix, 5/7 resolved with
+// "-instruct-" inserted) — so that's the best generic guess, not a guarantee.
+function buildPullName(name, quant) {
+  if (!quant) return name;
+  if (!name.includes(':')) return `${name}:instruct-${quant}`;
+  return name.endsWith('-instruct') ? `${name}-${quant}` : `${name}-instruct-${quant}`;
+}
+
 async function doPull() {
-  const name = (q('pull-input').value || '').trim();
-  if (!name) { toast('Enter a model name first', 'error'); return; }
+  const rawName = (q('pull-input').value || '').trim();
+  if (!rawName) { toast('Enter a model name first', 'error'); return; }
+  const quant = q('pull-quant').value;
+  const known = POPULAR_MODELS.find(m => m.name === rawName);
+  // Known chip models carry a verified-exact quantBase — suffix it directly,
+  // don't run it back through the guessing heuristic (it doesn't fit all of
+  // them, e.g. deepseek-r1's tag doesn't end in "-instruct").
+  const name = (quant && known?.quantBase)
+    ? `${known.quantBase}-${quant}`
+    : buildPullName(rawName, quant);
   const btn = q('pull-btn');
   btn.disabled = true; btn.textContent = 'Starting…';
   try {

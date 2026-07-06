@@ -359,14 +359,25 @@ textarea.input { resize: vertical; }
                  padding: 10px 8px; border-radius: var(--r-sm); margin: 2px 0; }
 .llm-model-row:hover { background: #f8fafc; }
 .llm-model-row-active { background: #f0fdf4; }
+.llm-model-separator { border-top: 1px solid var(--c-border); margin: 8px 4px; }
 .llm-model-info { display: flex; align-items: center; gap: 12px; }
 .llm-model-name { font-weight: 600; font-size: 13.5px; }
+.llm-model-quant { font-weight: 400; color: var(--c-muted); font-size: 12px; }
 .llm-model-size { color: var(--c-muted); font-size: 12px; }
 
 .llm-toggle-row { display: flex; align-items: flex-start; gap: 12px; margin-top: 14px;
                    padding-top: 14px; border-top: 1px solid var(--c-border); }
 .llm-toggle-label { font-size: 13px; font-weight: 600; }
 .llm-toggle-sub   { font-size: 12px; color: var(--c-muted); margin-top: 2px; line-height: 1.5; }
+
+.llm-advanced-header {
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--c-border);
+  font-size: 13px; font-weight: 600; color: var(--c-muted);
+  cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px;
+}
+.llm-advanced-header:hover { color: var(--c-text); }
+.llm-advanced-caret { display: inline-block; font-size: 11px; width: 10px; }
+#chat-display-settings .llm-toggle-row:first-child { margin-top: 12px; padding-top: 0; border-top: none; }
 
 .switch { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
 .switch input { opacity: 0; width: 0; height: 0; }

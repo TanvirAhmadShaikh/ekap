@@ -167,7 +167,13 @@ function handleSearch(v) {
 }
 
 /* ── Preview ────────────────────────────────────────────────────────────────── */
-async function openPreview(docId, title, meta = {}) {
+// pageNum only actually jumps for PDFs — PDF page numbers come from the real
+// page objects at ingestion time. Other formats (docx/txt/md) assign
+// page_number from synthetic "N paragraphs/lines per page" counts that don't
+// correspond to the preview endpoint's own (character-count-based) pagination,
+// so a jump there would silently land in the wrong place — safer to just open
+// at the top for those than fake precision.
+async function openPreview(docId, title, meta = {}, pageNum = null) {
   const myToken = ++_previewToken;
 
   q('preview-title').textContent = title;
@@ -202,7 +208,12 @@ async function openPreview(docId, title, meta = {}) {
       const totalPages   = parseInt(res.headers.get('X-Total-Pages') || '0', 10);
       const previewPages = parseInt(res.headers.get('X-Preview-Pages') || '0', 10);
       const partial      = totalPages > previewPages;
-      const url = URL.createObjectURL(await res.blob());
+      // If the target page isn't in this batch yet (still loading in the
+      // background), don't jump into a truncated PDF that doesn't contain it —
+      // wait and jump once the full-document swap-in below lands instead.
+      const pageReady = !pageNum || pageNum <= previewPages;
+      const frag      = pageReady && pageNum ? `#page=${pageNum}` : '';
+      const url = URL.createObjectURL(await res.blob()) + frag;
       q('preview-body').innerHTML = `<iframe src="${url}"></iframe>` + (partial
         ? `<div class="preview-partial-note">Showing first ${previewPages} of ${totalPages} pages — loading the rest in the background…</div>`
         : '');
@@ -210,7 +221,7 @@ async function openPreview(docId, title, meta = {}) {
         const container = q('preview-body');
         const oldIframe = container?.querySelector('iframe');
         if (!container || !oldIframe) return;
-        const url = URL.createObjectURL(await fullRes.blob());
+        const url = URL.createObjectURL(await fullRes.blob()) + (pageNum ? `#page=${pageNum}` : '');
         await swapIframeSeamless(container, oldIframe, url);
       });
     } else if (ct.startsWith('image/')) {
@@ -304,6 +315,18 @@ function closePreview() {
 let _chatOpen    = false;
 let _chatHistory = [];   // [{role,content}]
 let _chatBusy    = false;
+let _chatConfig  = { show_stats: false, show_timing: false };   // cached GET /api/llm/config
+
+// Turns "[Source N ...]" markers in a streamed reply into clickable spans that
+// open the real source document, using the citations array from ekap_stats.
+function linkifyCitations(text, citByNum) {
+  return esc(text).replace(/\[Source (\d+)[^\]]*\]/g, (match, num) => {
+    const c = citByNum[num];
+    if (!c) return match;
+    const meta = attrJson({ file_type: c.page_number ? `Page ${c.page_number}` : '', department: c.section || '' });
+    return `<span class="chat-citation-ref" onclick='openPreview(${attrJson(c.document_id)},${attrJson(c.document_title)},${meta},${attrJson(c.page_number)})'>${match}</span>`;
+  });
+}
 
 function toggleChat() {
   _chatOpen = !_chatOpen;
@@ -428,6 +451,7 @@ async function sendMessage() {
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
     let   buf     = '';
+    let   stats   = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -442,6 +466,7 @@ async function sendMessage() {
         if (raw === '[DONE]') continue;
         try {
           const chunk = JSON.parse(raw);
+          if (chunk.ekap_stats) { stats = chunk.ekap_stats; continue; }
           const delta = chunk.choices?.[0]?.delta?.content;
           if (delta) { fullText += delta; bubble.textContent = fullText; scrollBottom(); }
         } catch {}
@@ -451,25 +476,60 @@ async function sendMessage() {
     bubble.classList.remove('streaming');
     _chatHistory.push({ role: 'assistant', content: fullText });
 
-    // Show any [Source N] inline citations as chips below the bubble
-    const sources = [];
-    for (const m of fullText.matchAll(/\[Source (\d+)[^\]]*\]/g)) sources.push(m[1]);
-    const uniq = [...new Set(sources)];
-    if (uniq.length) {
+    // Real citation data (document_id/title/page) lets both the inline
+    // [Source N] markers and the chip list below open the actual source
+    // document instead of being static text.
+    const citByNum = {};
+    for (const c of stats?.citations || []) citByNum[c.source_num] = c;
+    bubble.innerHTML = linkifyCitations(fullText, citByNum);
+
+    const sourceNums = [...new Set([...fullText.matchAll(/\[Source (\d+)[^\]]*\]/g)].map(m => m[1]))];
+    if (sourceNums.length) {
       const src = document.createElement('div');
       src.className = 'chat-sources';
-      src.innerHTML = uniq.map(n =>
-        `<div class="chat-source-item"><span class="chat-source-num">[${n}]</span> Knowledge base</div>`
-      ).join('');
+      src.innerHTML = sourceNums.map(n => {
+        const c = citByNum[n];
+        if (!c) return `<div class="chat-source-item"><span class="chat-source-num">[${n}]</span> Knowledge base</div>`;
+        const label = `${c.document_title}${c.page_number ? ` · p.${c.page_number}` : ''}`;
+        const meta  = attrJson({ file_type: c.page_number ? `Page ${c.page_number}` : '', department: c.section || '' });
+        return `<div class="chat-source-item chat-source-clickable"
+                     onclick='openPreview(${attrJson(c.document_id)},${attrJson(c.document_title)},${meta},${attrJson(c.page_number)})'>
+                  <span class="chat-source-num">[${n}]</span> ${esc(label)}
+                </div>`;
+      }).join('');
       wrap.appendChild(src);
       scrollBottom();
     }
 
-    const timing = document.createElement('div');
-    timing.className = 'chat-timing';
-    timing.textContent = `⏱ ${formatDuration(performance.now() - startTime)}`;
-    wrap.appendChild(timing);
-    scrollBottom();
+    if (_chatConfig.show_stats) {
+      const statParts = stats
+        ? [stats.strategy || 'no retrieval', `${stats.chunks} chunk${stats.chunks === 1 ? '' : 's'}`, stats.model].filter(Boolean)
+        : [];
+      if (statParts.length) {
+        const statLine = document.createElement('div');
+        statLine.className = 'chat-timing';
+        statLine.textContent = `(${statParts.join(' · ')})`;
+        wrap.appendChild(statLine);
+      }
+
+      const GPU_LABEL = { gpu: '⚙ Using GPU', 'gpu-partial': '⚙ Using GPU (partial offload)', cpu: '⚙ Using CPU' };
+      const gpuLabel = GPU_LABEL[stats?.gpu];
+      if (gpuLabel) {
+        const gpuLine = document.createElement('div');
+        gpuLine.className = 'chat-timing';
+        gpuLine.textContent = gpuLabel;
+        wrap.appendChild(gpuLine);
+      }
+    }
+
+    if (_chatConfig.show_timing) {
+      const timing = document.createElement('div');
+      timing.className = 'chat-timing';
+      timing.textContent = `⏱ ${formatDuration(performance.now() - startTime)}`;
+      wrap.appendChild(timing);
+    }
+
+    if (_chatConfig.show_stats || _chatConfig.show_timing) scrollBottom();
 
   } catch(e) {
     removeThinking();
@@ -509,6 +569,7 @@ async function init() {
 async function loadChatModel() {
   try {
     const config = await apiFetch('/api/llm/config');
+    _chatConfig = config;
     q('chat-model-badge').textContent = (config.show_model_name && config.model) ? ` · ${config.model}` : '';
   } catch(e) { /* badge just stays empty if this fails */ }
 }
