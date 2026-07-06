@@ -556,6 +556,8 @@ async def get_llm_config(user: UserContext = Depends(get_user_context)):
         "model":            _current_model,
         "env_model":        LLM_MODEL,
         "base_url":         LLM_BASE_URL,
+        "backend":          "vllm" if "vllm" in LLM_BASE_URL else "ollama",
+        "gpu":              await _gpu_status(),
         "show_model_name":  _show_model_name,
         "show_stats":       _show_stats,
         "show_timing":      _show_timing,

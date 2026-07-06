@@ -355,6 +355,11 @@ textarea.input { resize: vertical; }
 .llm-note code { background: #f1f5f9; padding: 1px 5px; border-radius: 3px;
                  font-family: monospace; font-size: 12px; }
 
+.gpu-status-row { display: flex; align-items: center; gap: 10px; }
+.gpu-status-detail { font-size: 12.5px; color: var(--c-muted); margin-top: 6px; line-height: 1.55; }
+.gpu-warning-box { margin-top: 12px; padding: 10px 12px; background: #fef3c7; border-radius: var(--r-sm);
+                    font-size: 12.5px; color: #92400e; line-height: 1.55; }
+
 .llm-model-row { display: flex; align-items: center; justify-content: space-between;
                  padding: 10px 8px; border-radius: var(--r-sm); margin: 2px 0; }
 .llm-model-row:hover { background: #f8fafc; }

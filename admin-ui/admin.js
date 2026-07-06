@@ -1310,6 +1310,21 @@ async function refreshModelsList() {
   if ((modelsData.pulling || []).length) scheduleModelsPoll();
 }
 
+function gpuStatusRowHTML(config) {
+  const badges = {
+    'gpu':         { cls: 'badge-completed', label: '🟢 GPU' },
+    'gpu-partial': { cls: 'badge-processing', label: '🟡 Partial GPU' },
+    'cpu':         { cls: 'badge-failed', label: '🔴 CPU only' },
+    'unknown':     { cls: 'badge-outline', label: '⚪ Unknown' },
+  };
+  const b = badges[config.gpu] || badges.unknown;
+  return `
+    <div class="gpu-status-row">
+      <span class="badge ${b.cls}">${b.label}</span>
+      <span style="font-size:13px;color:var(--c-muted)">for the active model's last inference</span>
+    </div>`;
+}
+
 async function pageSettings() {
   clearTimeout(_settingsTimer);
   let config, modelsData;
@@ -1346,7 +1361,7 @@ async function pageSettings() {
           and run <code>docker compose up -d retrieval-service</code>.
         </p>
         <div class="llm-advanced-header" onclick="toggleChatDisplaySettings()">
-          <span id="chat-display-caret" class="llm-advanced-caret">▸</span> Chat display settings
+          <span id="chat-display-caret" class="llm-advanced-caret">▸</span> Chat display settings (Click to expand/collapse)
         </div>
         <div id="chat-display-settings" class="hidden">
           <div class="llm-toggle-row">
@@ -1394,6 +1409,36 @@ async function pageSettings() {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h2>Hardware &amp; GPU Setup</h2></div>
+      <div style="padding:16px 20px">
+        ${gpuStatusRowHTML(config)}
+        <p class="gpu-status-detail">
+          This reflects the <b>${esc(config.backend === 'vllm' ? 'vLLM' : 'Ollama')}</b> backend
+          (<code>${esc(config.base_url)}</code>) for the currently active model. Because Docker
+          isolates containers from the real host, EKAP can only report what the LLM backend
+          itself sees — it can't inspect the host's OS or GPU driver directly.
+        </p>
+        ${config.gpu === 'cpu' || config.gpu === 'unknown' ? `
+        <div class="gpu-warning-box">
+          ⚠ The active model does not appear to be using a GPU. If this machine has one,
+          download and run the setup-check script below <b>on the machine that hosts
+          Docker/Ollama</b> — it detects your OS and GPU driver setup and prints the exact
+          commands to fix it (or confirms CPU-only is expected/correct for this hardware).
+        </div>` : ''}
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <a class="btn btn-ghost btn-sm" href="docs/gpu-setup-check.sh" download>⬇ Download setup-check script</a>
+          <span class="gpu-status-detail" style="margin:0">
+            Run on the host: <code>chmod +x gpu-setup-check.sh && ./gpu-setup-check.sh</code>
+          </span>
+        </div>
+        <p class="gpu-status-detail">
+          On a headless server without a browser, fetch it directly instead:
+          <code>curl -o gpu-setup-check.sh ${esc(location.origin)}/admin/docs/gpu-setup-check.sh</code>
+        </p>
       </div>
     </div>
 
