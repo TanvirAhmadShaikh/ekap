@@ -378,6 +378,27 @@ textarea.input { resize: vertical; }
 .proc-time  { font-size: 11px; color: var(--c-primary); font-weight: 600; white-space: nowrap; }
 
 /* ── LLM Settings page ──────────────────────────────────────────────────────── */
+.llm-currently-active {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+  padding: 10px 16px; background: #f0fdf4; border: 1px solid #bbf7d0;
+  border-radius: var(--r); font-size: 14px; color: #166534;
+}
+.llm-currently-active b { font-weight: 700; }
+.llm-currently-active.llm-currently-active-public {
+  background: #fef2f2; border-color: #fecaca; color: #7f1d1d;
+}
+.llm-currently-active.llm-currently-active-public .llm-dot {
+  background: var(--c-danger); box-shadow: 0 0 0 3px rgba(220,38,38,.2);
+}
+
+/* Same green/red palette as .llm-backend-group-private/-public, applied to
+   whole cards — Installed Models/Pull New Model are always the private/local
+   option; Chat Backend + External Provider Credentials follow whichever
+   backend is currently selected/active. */
+.llm-card-private { border-left: 4px solid #16a34a; }
+.llm-card-private > .card-head { background: #f0fdf4; }
+.llm-card-public { border-left: 4px solid #dc2626; }
+.llm-card-public > .card-head { background: #fef2f2; }
 .llm-active-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .llm-dot { width: 10px; height: 10px; background: var(--c-success); border-radius: 50%;
            box-shadow: 0 0 0 3px rgba(22,163,74,.2); flex-shrink: 0; }
@@ -385,6 +406,27 @@ textarea.input { resize: vertical; }
 .llm-note { font-size: 12.5px; color: var(--c-muted); margin-top: 4px; line-height: 1.55; }
 .llm-note code { background: #f1f5f9; padding: 1px 5px; border-radius: 3px;
                  font-family: monospace; font-size: 12px; }
+
+.llm-backend-options { display: flex; gap: 16px; flex-wrap: wrap; }
+.llm-backend-option { display: flex; align-items: center; gap: 6px; font-size: 13.5px; cursor: pointer; }
+.llm-backend-group { border: 1px solid var(--c-border); border-radius: var(--r); padding: 12px 14px; margin-bottom: 14px; }
+.llm-backend-group-private { border-left: 3px solid #16a34a; background: #f0fdf4; }
+.llm-backend-group-public { border-left: 3px solid #dc2626; background: #fef2f2; }
+.llm-backend-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.llm-backend-group-title { font-weight: 700; font-size: 13.5px; }
+.llm-risk-box { margin: 10px 0 12px; padding: 10px 12px; background: #fff; border: 1px solid #fecaca;
+                border-radius: var(--r-sm); font-size: 12.5px; color: #7f1d1d; line-height: 1.55; }
+.llm-risk-box ul { margin: 6px 0 0; padding-left: 18px; }
+.llm-risk-box li { margin: 3px 0; }
+.llm-field-label { display: block; font-size: 12.5px; font-weight: 600; color: var(--c-text); margin-bottom: 6px; }
+.llm-class-checks { display: flex; gap: 14px; flex-wrap: wrap; }
+.llm-class-check { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+.llm-class-check-locked { color: var(--c-muted); cursor: not-allowed; }
+.llm-provider-row { border: 1px solid var(--c-border); border-radius: var(--r); padding: 12px 14px; }
+.llm-provider-info { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.llm-provider-name { font-weight: 600; font-size: 13.5px; }
+.llm-note-inline { font-size: 11.5px; color: var(--c-muted); }
+.llm-provider-form { display: flex; gap: 8px; }
 
 .gpu-status-row { display: flex; align-items: center; gap: 10px; }
 .gpu-status-detail { font-size: 12.5px; color: var(--c-muted); margin-top: 6px; line-height: 1.55; }
@@ -438,5 +480,36 @@ textarea.input { resize: vertical; }
 .llm-chip:hover { border-color: var(--c-primary); background: #eff6ff; }
 .llm-chip-name { display: block; font-weight: 600; font-size: 12.5px; color: var(--c-text); }
 .llm-chip-meta { display: block; font-size: 11px; color: var(--c-muted); margin-top: 2px; }
+
+.llm-chip-custom { position: relative; padding: 0; display: flex; align-items: stretch; }
+.llm-chip-fill {
+  background: none; border: none; padding: 8px 24px 8px 12px; cursor: pointer;
+  text-align: left; font-family: inherit; flex: 1;
+}
+.llm-chip-remove {
+  position: absolute; top: 4px; right: 4px; background: none; border: none;
+  color: var(--c-muted); cursor: pointer; font-size: 11px; line-height: 1;
+  padding: 3px; border-radius: 3px;
+}
+.llm-chip-remove:hover { color: var(--c-danger); background: #fef2f2; }
+
+.llm-suggest-box {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  background: var(--c-bg); border: 1px solid var(--c-border); border-radius: var(--r);
+  box-shadow: 0 4px 16px rgba(0,0,0,.1); max-height: 280px; overflow-y: auto;
+}
+.llm-suggest-item { border-bottom: 1px solid var(--c-border); padding: 8px 12px; }
+.llm-suggest-item:last-child { border-bottom: none; }
+.llm-suggest-head { cursor: pointer; }
+.llm-suggest-name { display: block; font-weight: 600; font-size: 13px; color: var(--c-text); }
+.llm-suggest-desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; font-size: 11.5px; color: var(--c-muted); margin-top: 2px; }
+.llm-suggest-sizes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.llm-suggest-size {
+  background: var(--c-bg); border: 1px solid var(--c-border); border-radius: 4px;
+  padding: 2px 8px; font-size: 11px; cursor: pointer; font-family: inherit;
+}
+.llm-suggest-size:hover { border-color: var(--c-primary); background: #eff6ff; }
+.llm-suggest-empty { padding: 10px 12px; font-size: 12.5px; color: var(--c-muted); }
 
 .hidden { display: none !important; }

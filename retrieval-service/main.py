@@ -17,6 +17,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 from starlette.responses import Response
 
+import providers
 from auth import UserContext, get_user_context
 
 DATABASE_URL        = os.getenv("DATABASE_URL", "postgresql://ekap:changeme@postgres:5432/ekap")
@@ -55,6 +56,9 @@ SYSTEM_PROMPT = (
     "(e.g. 'Chapter 5 ... 42', 'TRICEPS TRAINING 410'), treat it as if no useful content was found "
     "and tell the user the document has not been fully indexed yet.\n"
     "- Never infer, guess, or expand on what a source *might* say beyond what is explicitly quoted.\n"
+    "- Thoroughness means using everything relevant that IS in the context, not inventing what isn't: "
+    "if multiple sources or passages bear on the question, pull the relevant details from all of them "
+    "into one complete, well-explained answer rather than a single terse sentence.\n"
     "- If the answer is genuinely not present in the context, say exactly: "
     "\"I don't have that information in the knowledge base.\"\n"
     "- Give your answer exactly once. Do not restate, summarize, or repeat it "
@@ -119,7 +123,7 @@ async def audit(user_id: str, event_type: str, resource_id: str | None = None, d
 
 # ── Permission gate (now classification-aware) ────────────────────────────────
 
-def get_permitted_doc_ids(user: UserContext) -> list[str]:
+def get_permitted_doc_ids(user: UserContext, restrict_classifications: list[str] | None = None) -> list[str]:
     """
     Security gate — always runs before retrieval.
 
@@ -128,8 +132,17 @@ def get_permitted_doc_ids(user: UserContext) -> list[str]:
     - Explicit per-user document grants (from permissions table)
     - Lifecycle state filter: regular users see only 'published'; managers also see 'approved'
     - Soft-deleted documents are never returned
+
+    restrict_classifications, when given, further caps role-based access to
+    that set — used when an external LLM backend is active, so e.g. an
+    Administrator's normal Restricted-document access doesn't silently leak
+    into context sent to a third-party provider (see external_llm_settings).
+    Explicit per-user grants are NOT capped by this — an admin who explicitly
+    granted a user access to one specific document has already made that call.
     """
     classifications = list(user.accessible_classifications)
+    if restrict_classifications is not None:
+        classifications = [c for c in classifications if c in restrict_classifications]
 
     # Determine which lifecycle states this user may retrieve
     if REQUIRE_AUTH:
@@ -141,16 +154,22 @@ def get_permitted_doc_ids(user: UserContext) -> list[str]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Classification-based access (lifecycle + soft-delete filtered)
-            cls_ph = ",".join(["%s"] * len(classifications))
-            lc_ph  = ",".join(["%s"] * len(lifecycle_states))
-            cur.execute(
-                f"SELECT document_id::text FROM documents "
-                f"WHERE classification IN ({cls_ph}) AND status='completed' "
-                f"AND lifecycle_state IN ({lc_ph}) AND deleted_at IS NULL",
-                classifications + lifecycle_states,
-            )
-            class_ids = {r[0] for r in cur.fetchall()}
+            # Classification-based access (lifecycle + soft-delete filtered).
+            # An empty set (e.g. restrict_classifications shares nothing with
+            # this user's role access) is a valid outcome, not an error — just
+            # means no classification-based documents qualify.
+            if classifications:
+                cls_ph = ",".join(["%s"] * len(classifications))
+                lc_ph  = ",".join(["%s"] * len(lifecycle_states))
+                cur.execute(
+                    f"SELECT document_id::text FROM documents "
+                    f"WHERE classification IN ({cls_ph}) AND status='completed' "
+                    f"AND lifecycle_state IN ({lc_ph}) AND deleted_at IS NULL",
+                    classifications + lifecycle_states,
+                )
+                class_ids = {r[0] for r in cur.fetchall()}
+            else:
+                class_ids = set()
 
             # Explicit per-user grants (additive; still subject to lifecycle + soft-delete)
             cur.execute(
@@ -368,19 +387,29 @@ async def _gpu_status() -> str:
         return "unknown"
 
 
-async def stream_llm(messages: list[dict], cid: str, citations: list[dict], strategy: str, chunk_count: int):
+async def stream_llm(history: list[dict], cid: str, citations: list[dict], strategy: str, chunk_count: int, ext: dict):
+    backend = ext["backend"]
+    model   = ext["model"] if backend != "local" else _current_model
     try:
-        payload = {
-            "model": _current_model, "messages": messages, "stream": True,
-            "repetition_penalty": 1.15,  # discourage the model re-emitting a duplicate "Answer:" pass
-        }
-        if "vllm" not in LLM_BASE_URL:
-            payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
-        async with llm_client.stream("POST", f"{LLM_BASE_URL}/chat/completions", json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if line:
-                    yield line + "\n\n"
+        if backend == "local":
+            augmented = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
+            payload = {
+                "model": _current_model, "messages": augmented, "stream": True,
+                "repetition_penalty": 1.15,  # discourage the model re-emitting a duplicate "Answer:" pass
+            }
+            if "vllm" not in LLM_BASE_URL:
+                payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
+            async with llm_client.stream("POST", f"{LLM_BASE_URL}/chat/completions", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if line:
+                        yield line + "\n\n"
+        else:
+            api_key = get_provider_credential(backend)
+            if not api_key:
+                raise RuntimeError(f"No API key configured for {backend}.")
+            async for chunk in providers.STREAM_ADAPTERS[backend](model, SYSTEM_PROMPT, history, api_key):
+                yield chunk
     except Exception as _exc:
         n = len(citations)
         srcs = ", ".join(f"\"{c['document_title']}\" p.{c['page_number']}" for c in citations[:3])
@@ -391,6 +420,8 @@ async def stream_llm(messages: list[dict], cid: str, citations: list[dict], stra
                 f"The AI model took too long to respond. "
                 f"Retrieved {n} relevant chunk(s)." + (f" Top sources: {srcs}." if srcs else "")
             )
+        elif backend != "local":
+            stub = f"[{backend} error: {_exc}] Retrieved {n} chunk(s). " + (f"Top sources: {srcs}." if srcs else "No matches.")
         else:
             stub = (
                 f"[LLM unavailable — check Ollama is running] "
@@ -405,8 +436,8 @@ async def stream_llm(messages: list[dict], cid: str, citations: list[dict], stra
     # generator close (e.g. client disconnects mid-stream) raises "async generator
     # ignored GeneratorExit"; this way it only runs on a normal, watched completion.
     stats = {
-        "strategy": strategy, "chunks": chunk_count, "model": _current_model,
-        "gpu": await _gpu_status(), "citations": citations,
+        "strategy": strategy, "chunks": chunk_count, "model": model,
+        "gpu": (await _gpu_status()) if backend == "local" else backend, "citations": citations,
     }
     yield f"data: {json.dumps({'ekap_stats': stats})}\n\n"
 
@@ -425,8 +456,10 @@ def metrics():
 
 @app.get("/v1/models")
 def list_models():
+    ext = get_external_settings()
+    active = ext["model"] if ext["backend"] != "local" else _current_model
     return {"object": "list", "data": [
-        {"id": _current_model, "object": "model", "created": int(time.time()), "owned_by": "ekap"}
+        {"id": active, "object": "model", "created": int(time.time()), "owned_by": "ekap"}
     ]}
 
 
@@ -440,8 +473,16 @@ async def chat_completions(request: Request, user: UserContext = Depends(get_use
     user_question = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
     cid = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
+    # ── External-LLM governance ──────────────────────────────────────────────
+    # When an external provider is active, retrieval itself is capped to the
+    # admin-configured allowed classifications — this is the single point
+    # where "don't send Confidential/Restricted content off-box" is enforced,
+    # regardless of the requesting user's own (possibly broader) role access.
+    ext = get_external_settings()
+    class_cap = ext["allowed_classifications"] if ext["backend"] != "local" else None
+
     # ── Security gate ────────────────────────────────────────────────────────
-    permitted_ids = get_permitted_doc_ids(user)
+    permitted_ids = get_permitted_doc_ids(user, class_cap)
     if not permitted_ids:
         await audit(user.user_id, "PERMISSION_DENIED", details={"query": user_question[:200]})
 
@@ -459,7 +500,6 @@ async def chat_completions(request: Request, user: UserContext = Depends(get_use
             "role": "user",
             "content": f"Context:\n{context_block}\n\nQuestion: {history[-1]['content']}",
         }]
-    augmented = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
 
     # ── Audit ────────────────────────────────────────────────────────────────
     await audit(user.user_id, "QUERY", details={
@@ -469,29 +509,38 @@ async def chat_completions(request: Request, user: UserContext = Depends(get_use
         "doc_ids": [c["document_id"] for c in citations],
         "username": user.username,
         "roles": user.roles,
+        "backend": ext["backend"],
     })
 
     query_counter.labels(status="ok").inc()
     query_latency.observe(time.perf_counter() - t0)
 
     if do_stream:
-        return StreamingResponse(stream_llm(augmented, cid, citations, strategy, len(chunks)), media_type="text/event-stream")
+        return StreamingResponse(stream_llm(history, cid, citations, strategy, len(chunks), ext), media_type="text/event-stream")
 
+    active_model = ext["model"] if ext["backend"] != "local" else _current_model
     try:
-        payload = {
-            "model": _current_model, "messages": augmented, "stream": False,
-            "repetition_penalty": 1.15,  # discourage the model re-emitting a duplicate "Answer:" pass
-        }
-        if "vllm" not in LLM_BASE_URL:
-            payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
-        resp = await llm_client.post(f"{LLM_BASE_URL}/chat/completions", json=payload)
-        resp.raise_for_status()
-        answer = resp.json()["choices"][0]["message"]["content"]
-    except Exception:
-        answer = f"[LLM unavailable] Retrieved {len(citations)} chunk(s) via {strategy}."
+        if ext["backend"] == "local":
+            augmented = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
+            payload = {
+                "model": _current_model, "messages": augmented, "stream": False,
+                "repetition_penalty": 1.15,  # discourage the model re-emitting a duplicate "Answer:" pass
+            }
+            if "vllm" not in LLM_BASE_URL:
+                payload["keep_alive"] = "30m"  # Ollama-only: avoid a cold model reload between messages
+            resp = await llm_client.post(f"{LLM_BASE_URL}/chat/completions", json=payload)
+            resp.raise_for_status()
+            answer = resp.json()["choices"][0]["message"]["content"]
+        else:
+            api_key = get_provider_credential(ext["backend"])
+            if not api_key:
+                raise RuntimeError(f"No API key configured for {ext['backend']}.")
+            answer = await providers.COMPLETE_ADAPTERS[ext["backend"]](active_model, SYSTEM_PROMPT, history, api_key)
+    except Exception as e:
+        answer = f"[LLM unavailable: {e}] Retrieved {len(citations)} chunk(s) via {strategy}."
 
     return {
-        "id": cid, "object": "chat.completion", "created": int(time.time()), "model": _current_model,
+        "id": cid, "object": "chat.completion", "created": int(time.time()), "model": active_model,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "citations": citations, "retrieval_strategy": strategy,
@@ -553,15 +602,25 @@ async def post_feedback(request: Request, user: UserContext = Depends(get_user_c
 
 @app.get("/api/llm/config")
 async def get_llm_config(user: UserContext = Depends(get_user_context)):
+    # "model"/"backend"/"base_url"/"gpu" below describe the LOCAL Ollama/vLLM
+    # setup specifically (admin's Active Model + GPU Setup cards still need
+    # this regardless of what's actually live) — active_backend/active_model
+    # are what's actually serving chat right now, accounting for an external
+    # provider override. The Employee Portal must read the active_* fields,
+    # not "model"/"backend", or it shows stale local info after a switch.
+    ext = get_external_settings()
+    local_backend_label = "vllm" if "vllm" in LLM_BASE_URL else "ollama"
     return {
         "model":            _current_model,
         "env_model":        LLM_MODEL,
         "base_url":         LLM_BASE_URL,
-        "backend":          "vllm" if "vllm" in LLM_BASE_URL else "ollama",
+        "backend":          local_backend_label,
         "gpu":              await _gpu_status(),
         "show_model_name":  _show_model_name,
         "show_stats":       _show_stats,
         "show_timing":      _show_timing,
+        "active_backend":   ext["backend"] if ext["backend"] != "local" else local_backend_label,
+        "active_model":     ext["model"] if ext["backend"] != "local" else _current_model,
     }
 
 
@@ -598,6 +657,183 @@ async def set_llm_config(request: Request, user: UserContext = Depends(get_user_
     }
 
 
+ALL_CLASSIFICATIONS = ["Public", "Internal", "Confidential", "Restricted"]
+# Internal/Confidential/Restricted content is never allowed as external-LLM
+# context — only Public may leave this network, and that's not an
+# admin-configurable choice beyond it. Enforced here (not just disabled in the
+# admin UI) so a direct API call can't bypass it — and re-applied on every
+# read in get_external_settings() too, so a row saved before this policy
+# tightened can't keep granting a since-revoked classification.
+EXTERNAL_ALLOWED_CLASSIFICATIONS = ["Public"]
+EXTERNAL_PROVIDERS = ["openai", "anthropic", "deepseek", "google", "grok"]
+ALL_BACKENDS = ["local", *EXTERNAL_PROVIDERS]
+
+
+def get_external_settings() -> dict:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT backend, model, allowed_classifications FROM external_llm_settings WHERE id = 1"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"backend": "local", "model": None, "allowed_classifications": ["Public"]}
+    allowed = [c for c in row[2] if c in EXTERNAL_ALLOWED_CLASSIFICATIONS]
+    return {"backend": row[0], "model": row[1], "allowed_classifications": allowed}
+
+
+def get_provider_credential(provider: str) -> str | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT api_key_enc FROM external_llm_credentials WHERE provider = %s", (provider,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return providers.decrypt_secret(row[0]) if row else None
+
+
+@app.get("/api/llm/external-config")
+async def get_external_config(user: UserContext = Depends(get_user_context)):
+    settings = get_external_settings()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT provider, added_by, added_at FROM external_llm_credentials")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    configured = {r[0]: {"configured": True, "added_by": r[1], "added_at": r[2].isoformat()} for r in rows}
+    settings["providers"] = {
+        p: configured.get(p, {"configured": False}) for p in EXTERNAL_PROVIDERS
+    }
+    settings["all_classifications"] = ALL_CLASSIFICATIONS
+    return settings
+
+
+@app.post("/api/llm/external-config")
+async def set_external_config(request: Request, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    body    = await request.json()
+    backend = (body.get("backend") or "").strip()
+    model   = (body.get("model") or "").strip()
+    allowed = body.get("allowed_classifications")
+
+    if backend not in ALL_BACKENDS:
+        raise HTTPException(status_code=400, detail=f"backend must be one of {ALL_BACKENDS}.")
+    if not isinstance(allowed, list) or not all(c in EXTERNAL_ALLOWED_CLASSIFICATIONS for c in allowed):
+        raise HTTPException(
+            status_code=400,
+            detail=f"allowed_classifications must be a subset of {EXTERNAL_ALLOWED_CLASSIFICATIONS} — "
+                   f"Internal/Confidential/Restricted content can never be sent to an external LLM.",
+        )
+
+    if backend != "local":
+        if not model:
+            raise HTTPException(status_code=400, detail="model is required for an external backend.")
+        if get_provider_credential(backend) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Add an API key for {backend} first (see External Provider Credentials below).",
+            )
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO external_llm_settings (id, backend, model, allowed_classifications, updated_by) "
+                "VALUES (1, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "  backend = EXCLUDED.backend, model = EXCLUDED.model, "
+                "  allowed_classifications = EXCLUDED.allowed_classifications, "
+                "  updated_by = EXCLUDED.updated_by, updated_at = NOW()",
+                (backend, model or None, allowed, user.username),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    await audit(user.user_id, "EXTERNAL_LLM_CONFIG_CHANGE",
+                details={"backend": backend, "model": model, "allowed_classifications": allowed})
+    return get_external_settings()
+
+
+@app.post("/api/llm/external-credentials")
+async def add_external_credential(request: Request, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    body     = await request.json()
+    provider = (body.get("provider") or "").strip()
+    api_key  = (body.get("api_key") or "").strip()
+    if provider not in EXTERNAL_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"provider must be one of {EXTERNAL_PROVIDERS}.")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key is required.")
+
+    try:
+        encrypted = providers.encrypt_secret(api_key)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO external_llm_credentials (provider, api_key_enc, added_by) VALUES (%s, %s, %s) "
+                "ON CONFLICT (provider) DO UPDATE SET "
+                "  api_key_enc = EXCLUDED.api_key_enc, added_by = EXCLUDED.added_by, added_at = NOW()",
+                (provider, encrypted, user.username),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Never logs the key itself — only that one was set, and by whom.
+    await audit(user.user_id, "EXTERNAL_LLM_CREDENTIAL_SET", details={"provider": provider})
+    return {"provider": provider, "configured": True}
+
+
+@app.delete("/api/llm/external-credentials/{provider}")
+async def remove_external_credential(provider: str, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    if provider not in EXTERNAL_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"provider must be one of {EXTERNAL_PROVIDERS}.")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM external_llm_credentials WHERE provider = %s", (provider,))
+            deleted = cur.rowcount
+            # Safety: don't leave the active backend pointed at a provider with
+            # no key — fall back to local rather than fail every chat request.
+            reset = False
+            cur.execute("SELECT backend FROM external_llm_settings WHERE id = 1")
+            row = cur.fetchone()
+            if row and row[0] == provider:
+                cur.execute(
+                    "UPDATE external_llm_settings SET backend = 'local', model = NULL, "
+                    "updated_by = %s, updated_at = NOW() WHERE id = 1",
+                    (user.username,),
+                )
+                reset = True
+        conn.commit()
+    finally:
+        conn.close()
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f'No stored API key for "{provider}".')
+    await audit(user.user_id, "EXTERNAL_LLM_CREDENTIAL_REMOVED", details={"provider": provider, "backend_reset": reset})
+    return {"status": "removed", "provider": provider, "backend_reset": reset}
+
+
 @app.get("/api/llm/models")
 async def list_llm_models(user: UserContext = Depends(get_user_context)):
     try:
@@ -619,6 +855,174 @@ async def list_llm_models(user: UserContext = Depends(get_user_context)):
     except Exception as e:
         pulling = [{"name": name, **info} for name, info in _pulling.items()]
         return {"models": [], "active": _current_model, "pulling": pulling, "error": str(e)}
+
+
+# ── Custom "Pull New Model" chips ──────────────────────────────────────────────
+# Lets an admin add a chip for a model outside the built-in curated list
+# (admin-ui's POPULAR_MODELS) without a code change. Sizes are resolved from
+# the public Ollama registry once, at add time, and cached in custom_models.
+REGISTRY_BASE   = "https://registry.ollama.ai/v2/library"
+QUANT_SUFFIXES  = ["q4_0", "q4_K_M", "q5_K_M", "q8_0", "fp16"]
+
+
+async def _registry_manifest_size(tag: str) -> int | None:
+    lib, _, ver = tag.partition(":")
+    ver = ver or "latest"
+    url = f"{REGISTRY_BASE}/{lib}/manifests/{ver}"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+    except Exception:
+        return None
+    return sum(layer.get("size", 0) for layer in data.get("layers", []))
+
+
+def _guess_quant_tags(name: str, quant: str) -> list[str]:
+    # Mirrors admin.js's buildPullName heuristic (most Ollama instruct/chat
+    # models tag quantized variants "...-instruct-<quant>"), plus a bare
+    # "-<quant>" fallback for models that don't follow it — best-effort only,
+    # same disclaimer as the frontend's guessed-suffix path.
+    if ":" not in name:
+        guessed = f"{name}:instruct-{quant}"
+    elif name.endswith("-instruct"):
+        guessed = f"{name}-{quant}"
+    else:
+        guessed = f"{name}-instruct-{quant}"
+    return [guessed, f"{name}-{quant}"]
+
+
+# Best-effort HTML scrape of ollama.com's (undocumented) search page — there's
+# no public JSON search API, so this is fragile against site markup changes by
+# design; a parse failure just yields no suggestions, never breaks anything
+# else. Lets an admin search "qwen3" and get back the real library name(s) and
+# published sizes instead of having to already know the exact tag.
+_SEARCH_ITEM_RE   = re.compile(r'^([^"]+)"')
+_SEARCH_TITLE_RE  = re.compile(r'x-test-search-response-title>([^<]*)</span>')
+_SEARCH_DESC_RE   = re.compile(r'<p class="[^"]*">([^<]*)</p>')
+_SEARCH_SIZE_RE   = re.compile(r'x-test-size[^>]*>([^<]*)</span>')
+
+
+@app.get("/api/llm/registry-search")
+async def registry_search(q: str = "", user: UserContext = Depends(get_user_context)):
+    import html as html_module
+    term = q.strip()
+    if len(term) < 2:
+        return {"results": []}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get("https://ollama.com/search", params={"q": term})
+            resp.raise_for_status()
+            body = resp.text
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+    results = []
+    for block in body.split('<a href="/library/')[1:11]:
+        m = _SEARCH_ITEM_RE.match(block)
+        if not m:
+            continue
+        name  = m.group(1)
+        title = m.group(1)
+        if (t := _SEARCH_TITLE_RE.search(block)):
+            title = html_module.unescape(t.group(1).strip())
+        desc = ""
+        if (d := _SEARCH_DESC_RE.search(block)):
+            desc = html_module.unescape(d.group(1).strip())
+        sizes = [html_module.unescape(s) for s in _SEARCH_SIZE_RE.findall(block)]
+        results.append({"name": name, "title": title, "description": desc[:160], "sizes": sizes})
+    return {"results": results}
+
+
+@app.get("/api/llm/custom-models")
+async def list_custom_models(user: UserContext = Depends(get_user_context)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, label, note, quant_sizes, added_by, added_at "
+                "FROM custom_models ORDER BY added_at"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return {"models": [
+        {"name": r[0], "label": r[1], "note": r[2] or "", "quant_sizes": r[3],
+         "added_by": r[4], "added_at": r[5].isoformat()}
+        for r in rows
+    ]}
+
+
+@app.post("/api/llm/custom-models")
+async def add_custom_model(request: Request, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    body  = await request.json()
+    name  = (body.get("name") or "").strip()
+    label = (body.get("label") or "").strip() or name
+    note  = (body.get("note") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required.")
+
+    default_size = await _registry_manifest_size(name)
+    if default_size is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Could not find "{name}" on the Ollama registry. '
+                   f'Check the exact tag on ollama.com/library.',
+        )
+
+    quant_sizes = {"": default_size}
+    for quant in QUANT_SUFFIXES:
+        for candidate in _guess_quant_tags(name, quant):
+            size = await _registry_manifest_size(candidate)
+            if size is not None:
+                quant_sizes[quant] = size
+                break
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO custom_models (name, label, note, quant_sizes, added_by) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (name) DO UPDATE SET "
+                "  label = EXCLUDED.label, note = EXCLUDED.note, "
+                "  quant_sizes = EXCLUDED.quant_sizes, added_by = EXCLUDED.added_by, "
+                "  added_at = NOW() "
+                "RETURNING name, label, note, quant_sizes, added_by, added_at",
+                (name, label, note, json.dumps(quant_sizes), user.username),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    await audit(user.user_id, "CUSTOM_MODEL_ADDED", details={"name": name})
+    return {"name": row[0], "label": row[1], "note": row[2] or "", "quant_sizes": row[3],
+            "added_by": row[4], "added_at": row[5].isoformat()}
+
+
+@app.delete("/api/llm/custom-models/{name:path}")
+async def remove_custom_model(name: str, user: UserContext = Depends(get_user_context)):
+    from fastapi import HTTPException
+    if not user.can_manage_documents():
+        raise HTTPException(status_code=403, detail="Requires knowledge-manager or administrator role.")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM custom_models WHERE name = %s", (name,))
+            deleted = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f'"{name}" is not a custom model chip.')
+    await audit(user.user_id, "CUSTOM_MODEL_REMOVED", details={"name": name})
+    return {"status": "removed", "name": name}
 
 
 MAX_GPU_DIAGNOSTIC_LEN = 20_000  # pasted terminal output; cap so a pathological paste can't bloat the table

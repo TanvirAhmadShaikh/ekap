@@ -1343,17 +1343,53 @@ let _settingsTimer = null;
 // publishes — omit to allow all of them. Every model here has all 5 except
 // deepseek-r1, which only publishes q4_K_M/q8_0/fp16 (verified against the
 // registry; q4_0 and q5_K_M 404 for this specific model).
+// quantSizes = total download size per quant tag ('' = the Default/as-tagged
+// pull), pulled from each tag's real manifest on registry.ollama.ai
+// (2026-07-06) — download size varies per quant, so this can't be derived
+// from a single per-model number. `size` above is kept in sync with quantSizes['']
+// for the chip; the two had drifted for llama3.2:1b and mistral:7b before this pass.
 const POPULAR_MODELS = [
-  { name: 'llama3.2:1b',      label: 'Llama 3.2 1B',     size: '0.8 GB', note: 'Fastest',       quantBase: 'llama3.2:1b-instruct' },
-  { name: 'llama3.2:3b',      label: 'Llama 3.2 3B',     size: '2.0 GB', note: 'Recommended',    quantBase: 'llama3.2:3b-instruct' },
-  { name: 'phi3.5',           label: 'Phi-3.5 Mini',     size: '2.2 GB', note: 'Best reasoning', quantBase: 'phi3.5:3.8b-mini-instruct' },
-  { name: 'gemma2:2b',        label: 'Gemma 2 2B',       size: '1.6 GB', note: '',               quantBase: 'gemma2:2b-instruct' },
-  { name: 'qwen2.5:1.5b',     label: 'Qwen 2.5 1.5B',   size: '1.0 GB', note: '',                quantBase: 'qwen2.5:1.5b-instruct' },
-  { name: 'qwen2.5:3b',       label: 'Qwen 2.5 3B',      size: '2.0 GB', note: '',               quantBase: 'qwen2.5:3b-instruct' },
-  { name: 'mistral:7b',       label: 'Mistral 7B',       size: '4.1 GB', note: 'Higher quality', quantBase: 'mistral:7b-instruct' },
+  { name: 'llama3.2:1b',      label: 'Llama 3.2 1B',     size: '1.3 GB', note: 'Fastest',       quantBase: 'llama3.2:1b-instruct',
+    quantSizes: { '': '1.3 GB', q4_0: '771 MB', q4_K_M: '808 MB', q5_K_M: '912 MB', q8_0: '1.3 GB', fp16: '2.5 GB' } },
+  { name: 'llama3.2:3b',      label: 'Llama 3.2 3B',     size: '2.0 GB', note: 'Recommended',    quantBase: 'llama3.2:3b-instruct',
+    quantSizes: { '': '2.0 GB', q4_0: '1.9 GB', q4_K_M: '2.0 GB', q5_K_M: '2.3 GB', q8_0: '3.4 GB', fp16: '6.4 GB' } },
+  { name: 'phi3.5',           label: 'Phi-3.5 Mini',     size: '2.2 GB', note: 'Best reasoning', quantBase: 'phi3.5:3.8b-mini-instruct',
+    quantSizes: { '': '2.2 GB', q4_0: '2.2 GB', q4_K_M: '2.4 GB', q5_K_M: '2.8 GB', q8_0: '4.1 GB', fp16: '7.6 GB' } },
+  { name: 'gemma2:2b',        label: 'Gemma 2 2B',       size: '1.6 GB', note: '',               quantBase: 'gemma2:2b-instruct',
+    quantSizes: { '': '1.6 GB', q4_0: '1.6 GB', q4_K_M: '1.7 GB', q5_K_M: '1.9 GB', q8_0: '2.8 GB', fp16: '5.2 GB' } },
+  { name: 'qwen2.5:1.5b',     label: 'Qwen 2.5 1.5B',   size: '1.0 GB', note: '',                quantBase: 'qwen2.5:1.5b-instruct',
+    quantSizes: { '': '986 MB', q4_0: '935 MB', q4_K_M: '986 MB', q5_K_M: '1.1 GB', q8_0: '1.6 GB', fp16: '3.1 GB' } },
+  { name: 'qwen2.5:3b',       label: 'Qwen 2.5 3B',      size: '2.0 GB', note: '',               quantBase: 'qwen2.5:3b-instruct',
+    quantSizes: { '': '1.9 GB', q4_0: '1.8 GB', q4_K_M: '1.9 GB', q5_K_M: '2.2 GB', q8_0: '3.3 GB', fp16: '6.2 GB' } },
+  { name: 'mistral:7b',       label: 'Mistral 7B',       size: '4.4 GB', note: 'Higher quality', quantBase: 'mistral:7b-instruct',
+    quantSizes: { '': '4.4 GB', q4_0: '4.1 GB', q4_K_M: '4.4 GB', q5_K_M: '5.1 GB', q8_0: '7.7 GB', fp16: '14.5 GB' } },
   { name: 'deepseek-r1:1.5b', label: 'DeepSeek-R1 1.5B', size: '1.1 GB', note: 'Reasoning',      quantBase: 'deepseek-r1:1.5b-qwen-distill',
-    quantLevels: ['q4_K_M', 'q8_0', 'fp16'] },
+    quantLevels: ['q4_K_M', 'q8_0', 'fp16'],
+    quantSizes: { '': '1.1 GB', q4_K_M: '1.1 GB', q8_0: '1.9 GB', fp16: '3.6 GB' } },
 ];
+
+// Admin-added chips for models outside the curated list above (see
+// /api/llm/custom-models) — populated by pageSettings() on each load.
+let _customModels = [];
+
+// Chat backend + external provider config (see /api/llm/external-config) —
+// populated by pageSettings() on each load.
+let _externalConfig = { backend: 'local', model: null, allowed_classifications: ['Public'], providers: {}, all_classifications: ['Public','Internal','Confidential','Restricted'] };
+
+// Looks a typed/selected model up across both sources and normalizes to the
+// shape updateQuantOptions() needs. Custom models carry raw byte counts in
+// quant_sizes (resolved server-side at add time); POPULAR_MODELS carries
+// pre-formatted strings — updateQuantOptions() handles both.
+function findKnownModel(name) {
+  const popular = POPULAR_MODELS.find(m => m.name === name);
+  if (popular) return popular;
+  const custom = _customModels.find(m => m.name === name);
+  if (!custom) return null;
+  return {
+    quantSizes: custom.quant_sizes,
+    quantLevels: Object.keys(custom.quant_sizes).filter(Boolean),
+  };
+}
 
 // Ollama tags encode quantization as a suffix (e.g. llama3.2:3b-instruct-q4_0).
 // Not every model publishes every level — an unknown tag just fails the pull.
@@ -1484,6 +1520,349 @@ function gpuStatusRowHTML(config) {
     </div>`;
 }
 
+// Single source of truth for which external backends exist — drives the
+// Chat Backend radios, provider labels, and the credentials card. `group`
+// separates self-hosted ("private" — never leaves this network) from
+// third-party cloud ("public" — data leaves this network) so the UI can
+// render them as two visually distinct sections instead of one flat list.
+const BACKEND_OPTIONS = [
+  { value: 'local',     label: 'Local (Ollama / vLLM)',      group: 'private' },
+  { value: 'openai',    label: 'OpenAI (ChatGPT)',            group: 'public' },
+  { value: 'anthropic', label: 'Anthropic (Claude)',          group: 'public' },
+  { value: 'deepseek',  label: 'DeepSeek',                    group: 'public' },
+  { value: 'google',    label: 'Google AI Studio (Gemini)',   group: 'public' },
+  { value: 'grok',      label: 'Grok (xAI)',                  group: 'public' },
+];
+const PROVIDER_LABEL = Object.fromEntries(
+  BACKEND_OPTIONS.filter(b => b.value !== 'local').map(b => [b.value, b.label.replace(/\s*\(.*\)$/, '')])
+);
+
+// Curated model shortlist per provider — "Custom…" always lets an admin type
+// any other model ID directly, since provider lineups change faster than
+// this list will get updated.
+const EXTERNAL_MODELS = {
+  openai: [
+    { value: 'gpt-4o',       label: 'GPT-4o' },
+    { value: 'gpt-4o-mini',  label: 'GPT-4o mini' },
+    { value: 'gpt-4.1',      label: 'GPT-4.1' },
+    { value: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
+    { value: 'o1',           label: 'o1' },
+    { value: 'o3-mini',      label: 'o3-mini' },
+  ],
+  anthropic: [
+    { value: 'claude-opus-4-8',             label: 'Claude Opus 4.8' },
+    { value: 'claude-sonnet-5',             label: 'Claude Sonnet 5' },
+    { value: 'claude-haiku-4-5-20251001',   label: 'Claude Haiku 4.5' },
+  ],
+  deepseek: [
+    { value: 'deepseek-chat',     label: 'DeepSeek-V3 (chat)' },
+    { value: 'deepseek-reasoner', label: 'DeepSeek-R1 (reasoner)' },
+  ],
+  google: [
+    { value: 'gemini-2.5-pro',   label: 'Gemini 2.5 Pro' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+  ],
+  grok: [
+    { value: 'grok-4',      label: 'Grok 4' },
+    { value: 'grok-3',      label: 'Grok 3' },
+    { value: 'grok-3-mini', label: 'Grok 3 mini' },
+  ],
+};
+
+function isCustomModel(backend, model) {
+  return !!model && !(EXTERNAL_MODELS[backend] || []).some(m => m.value === model);
+}
+
+function externalModelOptionsHTML(backend, model) {
+  const curated = EXTERNAL_MODELS[backend] || [];
+  const custom  = isCustomModel(backend, model);
+  return curated.map(m => `<option value="${esc(m.value)}" ${model === m.value ? 'selected' : ''}>${esc(m.label)}</option>`).join('')
+    + `<option value="__custom__" ${custom ? 'selected' : ''}>Custom…</option>`;
+}
+
+function backendGroup(backend) {
+  return BACKEND_OPTIONS.find(o => o.value === backend)?.group || 'private';
+}
+
+function chatBackendCardHTML() {
+  const { backend, model, allowed_classifications, providers, all_classifications } = _externalConfig;
+  const providerLabel = PROVIDER_LABEL[backend] || backend;
+  const privateOpts = BACKEND_OPTIONS.filter(o => o.group === 'private');
+  const publicOpts  = BACKEND_OPTIONS.filter(o => o.group === 'public');
+  const radioHTML = o => `
+    <label class="llm-backend-option">
+      <input type="radio" name="chat-backend" value="${o.value}" ${backend === o.value ? 'checked' : ''} onchange="onChatBackendChange()">
+      ${esc(o.label)}
+    </label>`;
+  return `
+    <div class="card ${backendGroup(backend) === 'public' ? 'llm-card-public' : 'llm-card-private'}" style="margin-bottom:16px" id="chat-backend-card">
+      <div class="card-head"><h2>Chat Backend</h2></div>
+      <div style="padding:16px 20px">
+
+        <div class="llm-backend-group llm-backend-group-private">
+          <div class="llm-backend-group-head">
+            <span class="llm-backend-group-title">🔒 Private LLM — self-hosted</span>
+            <span class="badge badge-published">Stays on this network</span>
+          </div>
+          <p class="llm-note">Runs on your own infrastructure. Chat messages and document context never leave this network.</p>
+          <div class="llm-backend-options">${privateOpts.map(radioHTML).join('')}</div>
+        </div>
+
+        <div class="llm-backend-group llm-backend-group-public">
+          <div class="llm-backend-group-head">
+            <span class="llm-backend-group-title">☁ Public LLM — third-party cloud</span>
+            <span class="badge badge-review">Data leaves this network</span>
+          </div>
+          <div class="llm-risk-box">
+            <b>⚠ Before selecting a public provider, understand the risks:</b>
+            <ul>
+              <li>Chat messages and retrieved document context are transmitted over the internet to that provider's servers — outside your self-hosted infrastructure.</li>
+              <li>Data handling is governed by the provider's own privacy policy, terms of service, and data-retention practices — not by EKAP.</li>
+              <li>Unless you have a specific enterprise / zero-data-retention agreement with the provider, submitted data may be logged or retained by them.</li>
+              <li>Only <b>Public</b> classified content can ever be sent as context — <b>Internal</b>, <b>Confidential</b>, and <b>Restricted</b> are always blocked, enforced server-side.</li>
+              <li>Requires an API key for that provider (stored encrypted here); usage is billed separately by the provider, outside EKAP.</li>
+            </ul>
+          </div>
+          <div class="llm-backend-options">${publicOpts.map(radioHTML).join('')}</div>
+        </div>
+
+        <div id="external-backend-details" class="${backend === 'local' ? 'hidden' : ''}" style="margin-top:14px">
+          <div class="gpu-warning-box">
+            ⚠ <b id="external-provider-name">${esc(providerLabel)}</b> is a public cloud provider — see the risk notice above.
+            Only the classifications checked below will ever be included as context, regardless of what the asking
+            user's own role would otherwise permit.
+          </div>
+
+          <label class="llm-field-label" style="margin-top:14px">Model</label>
+          <select class="input" id="external-model-select" style="max-width:320px" onchange="onExternalModelSelectChange()">
+            ${externalModelOptionsHTML(backend, model)}
+          </select>
+          <input class="input ${isCustomModel(backend, model) ? '' : 'hidden'}" id="external-model-input"
+                 placeholder="Exact model ID" value="${esc(model || '')}" style="max-width:320px;margin-top:8px">
+
+          <label class="llm-field-label" style="margin-top:14px">Classifications allowed as context</label>
+          <div class="llm-class-checks">
+            ${all_classifications.map(c => {
+              const locked = c !== 'Public';
+              return `
+              <label class="llm-class-check ${locked ? 'llm-class-check-locked' : ''}"
+                     title="${locked ? 'Never allowed as context for an external LLM' : ''}">
+                <input type="checkbox" class="external-class-check" value="${esc(c)}"
+                       ${!locked && allowed_classifications.includes(c) ? 'checked' : ''} ${locked ? 'disabled' : ''}>
+                ${esc(c)}${locked ? ' 🔒' : ''}
+              </label>`;
+            }).join('')}
+          </div>
+          <p class="llm-note">Internal, Confidential, and Restricted are always excluded from external-LLM context — only Public may be sent, and that's not admin-configurable.</p>
+
+          <p id="external-key-missing-note" class="llm-note ${providers[backend]?.configured ? 'hidden' : ''}" style="color:var(--c-danger)">
+            No API key saved for <span id="external-key-missing-provider">${esc(providerLabel)}</span> yet — add one below, then Save here.
+          </p>
+        </div>
+
+        <button class="btn btn-primary btn-sm" style="margin-top:16px" onclick="saveExternalConfig()">Save Backend Settings</button>
+      </div>
+    </div>`;
+}
+
+function providerCredentialRowHTML(provider) {
+  const info = _externalConfig.providers[provider] || { configured: false };
+  return `
+    <div class="llm-provider-row">
+      <div class="llm-provider-info">
+        <span class="llm-provider-name">${PROVIDER_LABEL[provider]}</span>
+        ${info.configured
+          ? `<span class="badge badge-published">Configured</span>
+             <span class="llm-note-inline">by ${esc(info.added_by)} · ${fmtDateTime(info.added_at)}</span>`
+          : `<span class="badge badge-review">Not configured</span>`}
+      </div>
+      <div class="llm-provider-form">
+        <input class="input" type="password" id="provider-key-${provider}"
+               placeholder="${info.configured ? 'Enter a new key to replace it' : 'Paste API key'}" style="flex:1">
+        <button class="btn btn-primary btn-sm" onclick="saveProviderKey('${provider}')">Save</button>
+        ${info.configured ? `<button class="btn btn-danger btn-sm" onclick="removeProviderKey('${provider}')">Remove</button>` : ''}
+      </div>
+    </div>`;
+}
+
+// Only the row for the currently selected backend is shown — keeps the admin
+// from having to scan an unrelated provider's credentials while configuring
+// this one. Whole card hidden for Local, which has no external credentials.
+function externalProviderCredentialsCardHTML(backend) {
+  return `
+    <div class="card llm-card-public ${backend === 'local' ? 'hidden' : ''}" style="margin-bottom:16px" id="external-credentials-card">
+      <div class="card-head"><h2>External Provider Credentials</h2></div>
+      <div style="padding:16px 20px;display:flex;flex-direction:column;gap:12px" id="external-credentials-body">
+        ${backend !== 'local' ? providerCredentialRowHTML(backend) : ''}
+        <p class="llm-note">Keys are encrypted at rest and never shown again after saving — only whether one is configured.</p>
+      </div>
+    </div>`;
+}
+
+function onChatBackendChange() {
+  const backend = document.querySelector('input[name="chat-backend"]:checked')?.value || 'local';
+  q('external-backend-details')?.classList.toggle('hidden', backend === 'local');
+  const isPublic = backendGroup(backend) === 'public';
+  q('chat-backend-card')?.classList.toggle('llm-card-public', isPublic);
+  q('chat-backend-card')?.classList.toggle('llm-card-private', !isPublic);
+  const label = PROVIDER_LABEL[backend] || backend;
+  const nameEl = q('external-provider-name');
+  if (nameEl) nameEl.textContent = label;
+
+  const missingNote = q('external-key-missing-note');
+  if (missingNote) {
+    const configured = !!_externalConfig.providers[backend]?.configured;
+    missingNote.classList.toggle('hidden', backend === 'local' || configured);
+    const provEl = q('external-key-missing-provider');
+    if (provEl) provEl.textContent = label;
+  }
+
+  // Each provider has its own curated model shortlist — rebuild the options
+  // rather than reusing whatever the other provider's radio had selected.
+  const modelSelect = q('external-model-select');
+  if (modelSelect && backend !== 'local') {
+    modelSelect.innerHTML = externalModelOptionsHTML(backend, null);
+    onExternalModelSelectChange();
+  }
+
+  // Local-only cards (Active Model / Installed Models / Pull New Model) and
+  // the External Provider Credentials card are mutually exclusive — only the
+  // section relevant to the selected backend stays visible.
+  q('local-backend-cards')?.classList.toggle('hidden', backend !== 'local');
+  const credCard = q('external-credentials-card');
+  if (credCard) {
+    credCard.classList.toggle('hidden', backend === 'local');
+    const body = q('external-credentials-body');
+    if (body && backend !== 'local') {
+      body.innerHTML = providerCredentialRowHTML(backend)
+        + '<p class="llm-note">Keys are encrypted at rest and never shown again after saving — only whether one is configured.</p>';
+    }
+  }
+}
+
+function onExternalModelSelectChange() {
+  const select = q('external-model-select');
+  const input  = q('external-model-input');
+  if (!select || !input) return;
+  const custom = select.value === '__custom__';
+  input.classList.toggle('hidden', !custom);
+  if (!custom) input.value = '';
+}
+
+async function saveExternalConfig() {
+  const backend     = document.querySelector('input[name="chat-backend"]:checked')?.value || 'local';
+  const modelSelect = q('external-model-select');
+  const model       = (modelSelect && modelSelect.value !== '__custom__')
+    ? modelSelect.value
+    : (q('external-model-input')?.value || '').trim();
+  const allowed = [...document.querySelectorAll('.external-class-check:checked:not(:disabled)')].map(el => el.value);
+
+  // If a key is sitting in the credentials field below for this provider,
+  // save it first — so setting up a new provider is one click (pick backend,
+  // type key, Save here) instead of two. The credentials card's own Save
+  // button still exists for rotating a key later without touching backend
+  // settings, or for pre-staging a key before switching to that provider.
+  if (backend !== 'local') {
+    const apiKey = (q(`provider-key-${backend}`)?.value || '').trim();
+    if (apiKey) {
+      try { await apiFetch('/api/llm/external-credentials', {
+        method: 'POST',
+        body: JSON.stringify({ provider: backend, api_key: apiKey }),
+      }); }
+      catch(e) { toast(e.message, 'error'); return; }
+    }
+  }
+
+  try {
+    await apiFetch('/api/llm/external-config', {
+      method: 'POST',
+      body: JSON.stringify({ backend, model, allowed_classifications: allowed }),
+    });
+    toast(`Chat backend set to "${backend}"`, 'success');
+    pageSettings();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function saveProviderKey(provider) {
+  const input  = q(`provider-key-${provider}`);
+  const apiKey = (input?.value || '').trim();
+  if (!apiKey) { toast('Paste an API key first', 'error'); return; }
+  try {
+    await apiFetch('/api/llm/external-credentials', {
+      method: 'POST',
+      body: JSON.stringify({ provider, api_key: apiKey }),
+    });
+    toast(`${PROVIDER_LABEL[provider]} API key saved`, 'success');
+    pageSettings();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function removeProviderKey(provider) {
+  if (!confirm(`Remove the stored ${PROVIDER_LABEL[provider]} API key? If it's the active backend, chat will fall back to Local.`)) return;
+  try {
+    const res = await apiFetch(`/api/llm/external-credentials/${encodeURIComponent(provider)}`, { method: 'DELETE' });
+    toast(res.backend_reset ? `Removed ${PROVIDER_LABEL[provider]} key — backend reset to Local` : `Removed ${PROVIDER_LABEL[provider]} key`, 'success');
+    pageSettings();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// These govern what the Employee Portal shows under each reply — they apply
+// no matter which backend answered, so this card lives outside local-backend-cards
+// and stays visible for every Chat Backend selection, not just Local.
+function chatDisplaySettingsCardHTML(config, activeModelLabel) {
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h2>Chat Display Settings</h2></div>
+      <div style="padding:16px 20px">
+        <div class="llm-toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="show-model-toggle"
+                   ${config.show_model_name ? 'checked' : ''}
+                   onchange="toggleShowModelName(this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+          <div>
+            <div class="llm-toggle-label">Show model name in chat header</div>
+            <div class="llm-toggle-sub">
+              When on, the Employee Portal's AI Assistant panel shows the active model name
+              (e.g. "${esc(activeModelLabel || '—')}") next to "Answers from the knowledge base".
+            </div>
+          </div>
+        </div>
+        <div class="llm-toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="show-stats-toggle"
+                   ${config.show_stats ? 'checked' : ''}
+                   onchange="toggleShowStats(this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+          <div>
+            <div class="llm-toggle-label">Show response stats</div>
+            <div class="llm-toggle-sub">
+              When on, each reply in the Employee Portal shows retrieval strategy, chunk count,
+              model, and GPU/CPU (or the cloud provider, when an external backend is active) underneath it.
+            </div>
+          </div>
+        </div>
+        <div class="llm-toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="show-timing-toggle"
+                   ${config.show_timing ? 'checked' : ''}
+                   onchange="toggleShowTiming(this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+          <div>
+            <div class="llm-toggle-label">Show time taken</div>
+            <div class="llm-toggle-sub">
+              When on, each reply in the Employee Portal shows how long it took to respond.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
 async function pageSettings() {
   clearTimeout(_settingsTimer);
   let config, modelsData;
@@ -1496,15 +1875,37 @@ async function pageSettings() {
     q('content').innerHTML = `<div class="empty"><p>⚠ ${esc(e.message)}</p></div>`;
     return;
   }
+  // Non-fatal — an admin's custom chips are a nice-to-have; don't block the
+  // whole Settings page if this one call fails.
+  try { _customModels = (await apiFetch('/api/llm/custom-models')).models || []; }
+  catch(e) { _customModels = []; }
+  try { _externalConfig = await apiFetch('/api/llm/external-config'); }
+  catch(e) { _externalConfig = { backend: 'local', model: null, allowed_classifications: ['Public'], providers: {}, all_classifications: ['Public','Internal','Confidential','Restricted'] }; }
 
   const pulling = modelsData.pulling || [];
   const active  = config.model;
   const matchesEnv = active === config.env_model;
+  const activeModelLabel = _externalConfig.backend !== 'local' ? _externalConfig.model : active;
+
+  const activeBackendLabel = _externalConfig.backend === 'local' ? 'Local (Ollama / vLLM)' : PROVIDER_LABEL[_externalConfig.backend];
+  const activeIsPrivate = _externalConfig.backend === 'local';
 
   q('content').innerHTML = `
     <div class="page-header"><h1>LLM Settings</h1></div>
 
-    <div class="card" style="margin-bottom:16px">
+    <div class="llm-currently-active ${activeIsPrivate ? '' : 'llm-currently-active-public'}">
+      <span class="llm-dot"></span>
+      Currently answering chat: <b>${esc(activeBackendLabel)}</b> — <b>${esc(activeModelLabel || '—')}</b>
+      <span class="badge ${activeIsPrivate ? 'badge-published' : 'badge-review'}" style="margin-left:8px">
+        ${activeIsPrivate ? '🔒 Private' : '☁ Public — data leaves network'}
+      </span>
+    </div>
+
+    ${chatBackendCardHTML()}
+    ${externalProviderCredentialsCardHTML(_externalConfig.backend)}
+
+    <div id="local-backend-cards" class="${_externalConfig.backend !== 'local' ? 'hidden' : ''}">
+    <div class="card llm-card-private" style="margin-bottom:16px">
       <div class="card-head"><h2>Active Model</h2></div>
       <div style="padding:16px 20px">
         <div class="llm-active-row">
@@ -1519,59 +1920,10 @@ async function pageSettings() {
           To make permanent, set <code>OLLAMA_MODEL=${esc(active)}</code> in your <code>.env</code>
           and run <code>docker compose up -d retrieval-service</code>.
         </p>
-        <div class="llm-advanced-header" onclick="toggleChatDisplaySettings()">
-          <span id="chat-display-caret" class="llm-advanced-caret">▸</span> Chat display settings (Click to expand/collapse)
-        </div>
-        <div id="chat-display-settings" class="hidden">
-          <div class="llm-toggle-row">
-            <label class="switch">
-              <input type="checkbox" id="show-model-toggle"
-                     ${config.show_model_name ? 'checked' : ''}
-                     onchange="toggleShowModelName(this.checked)">
-              <span class="switch-slider"></span>
-            </label>
-            <div>
-              <div class="llm-toggle-label">Show model name in chat header</div>
-              <div class="llm-toggle-sub">
-                When on, the Employee Portal's AI Assistant panel shows the active model name
-                (e.g. "${esc(active)}") next to "Answers from the knowledge base".
-              </div>
-            </div>
-          </div>
-          <div class="llm-toggle-row">
-            <label class="switch">
-              <input type="checkbox" id="show-stats-toggle"
-                     ${config.show_stats ? 'checked' : ''}
-                     onchange="toggleShowStats(this.checked)">
-              <span class="switch-slider"></span>
-            </label>
-            <div>
-              <div class="llm-toggle-label">Show response stats</div>
-              <div class="llm-toggle-sub">
-                When on, each reply in the Employee Portal shows retrieval strategy, chunk count,
-                model, and GPU/CPU underneath it.
-              </div>
-            </div>
-          </div>
-          <div class="llm-toggle-row">
-            <label class="switch">
-              <input type="checkbox" id="show-timing-toggle"
-                     ${config.show_timing ? 'checked' : ''}
-                     onchange="toggleShowTiming(this.checked)">
-              <span class="switch-slider"></span>
-            </label>
-            <div>
-              <div class="llm-toggle-label">Show time taken</div>
-              <div class="llm-toggle-sub">
-                When on, each reply in the Employee Portal shows how long it took to respond.
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
-    <div class="card" style="margin-bottom:16px">
+    <div class="card llm-card-private" style="margin-bottom:16px">
       <div class="card-head">
         <h2>Installed Models</h2>
         <button class="btn btn-ghost btn-sm" onclick="pageSettings()">↺ Refresh</button>
@@ -1579,7 +1931,7 @@ async function pageSettings() {
       <div id="models-list-body">${modelsListBodyHTML(modelsData)}</div>
     </div>
 
-    <div class="card">
+    <div class="card llm-card-private">
       <div class="card-head"><h2>Pull New Model</h2></div>
       <div style="padding:16px 20px;display:flex;flex-direction:column;gap:14px">
         <div>
@@ -1592,6 +1944,36 @@ async function pageSettings() {
                 <span class="llm-chip-name">${esc(m.label)}</span>
                 <span class="llm-chip-meta">${esc(m.size)}${m.note ? ' · ' + esc(m.note) : ''}</span>
               </button>`).join('')}
+            ${_customModels.map(m => `
+              <div class="llm-chip llm-chip-custom">
+                <button class="llm-chip-fill" onclick="fillPullInput('${esc(m.name)}')">
+                  <span class="llm-chip-name">${esc(m.label)}</span>
+                  <span class="llm-chip-meta">${esc(fmtBytes(m.quant_sizes[''] ?? 0))}${m.note ? ' · ' + esc(m.note) : ''}</span>
+                </button>
+                <button class="llm-chip-remove" title="Remove this chip" onclick="removeCustomModel('${esc(m.name)}')">✕</button>
+              </div>`).join('')}
+          </div>
+        </div>
+        <div>
+          <div class="llm-advanced-header" onclick="toggleAddCustomModel()">
+            <span id="add-custom-caret" class="llm-advanced-caret">▸</span> Add a model not listed above
+          </div>
+          <div id="add-custom-model-form" class="hidden" style="margin-top:10px">
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <div style="position:relative;flex:1;min-width:200px">
+                <input class="input" id="custom-model-name" placeholder="Search e.g. qwen3, llama, phi..." style="width:100%"
+                       autocomplete="off" oninput="onCustomModelNameInput()"
+                       onfocus="onCustomModelNameInput()" onblur="setTimeout(hideCustomModelSuggestions, 150)">
+                <div id="custom-model-suggestions" class="llm-suggest-box hidden"></div>
+              </div>
+              <input class="input" id="custom-model-label" placeholder="Display label (optional)" style="flex:1;min-width:160px">
+              <button class="btn btn-primary btn-sm" id="add-custom-model-btn" onclick="addCustomModel()">+ Add chip</button>
+            </div>
+            <p style="font-size:12px;color:var(--c-muted);margin-top:6px">
+              Search finds the real name on Ollama's library — click a size to fill in the exact tag, or type the exact
+              tag directly if you already know it. Adding checks it against the registry and pulls its real download
+              size before saving it as a chip everyone in this admin portal can see — doesn't download the model itself.
+            </p>
           </div>
         </div>
         <div style="display:flex;gap:8px">
@@ -1610,7 +1992,10 @@ async function pageSettings() {
           with "manifest does not exist".
         </p>
       </div>
-    </div>`;
+    </div>
+    </div>
+
+    ${chatDisplaySettingsCardHTML(config, activeModelLabel)}`;
 
   if (pulling.length) scheduleModelsPoll();
 }
@@ -1767,10 +2152,91 @@ async function loadBrandingIntoSidebar() {
 
 // Collapsed by default every time the Settings page loads — the toggles below
 // are occasional/debug-facing, not something an admin needs open every visit.
-function toggleChatDisplaySettings() {
-  q('chat-display-settings').classList.toggle('hidden');
-  const caret = q('chat-display-caret');
+function toggleAddCustomModel() {
+  q('add-custom-model-form').classList.toggle('hidden');
+  const caret = q('add-custom-caret');
   caret.textContent = caret.textContent === '▸' ? '▾' : '▸';
+}
+
+let _customSearchTimer = null;
+let _customSearchToken  = 0;
+
+function onCustomModelNameInput() {
+  clearTimeout(_customSearchTimer);
+  const term = (q('custom-model-name')?.value || '').trim();
+  if (term.length < 2) { hideCustomModelSuggestions(); return; }
+  _customSearchTimer = setTimeout(() => runCustomModelSearch(term), 300);
+}
+
+// Ollama has no public JSON search API — this hits a backend endpoint that
+// scrapes ollama.com/search server-side, so the admin can find the real
+// library name (and its published sizes) from a substring instead of having
+// to already know the exact tag.
+async function runCustomModelSearch(term) {
+  const token = ++_customSearchToken;
+  let data;
+  try { data = await apiFetch(`/api/llm/registry-search?q=${encodeURIComponent(term)}`); }
+  catch(e) { return; }
+  if (token !== _customSearchToken) return; // a newer keystroke already fired
+  const box = q('custom-model-suggestions');
+  if (!box) return;
+  const results = data.results || [];
+  if (!results.length) {
+    box.innerHTML = `<div class="llm-suggest-empty">No matches on ollama.com/library for "${esc(term)}"</div>`;
+  } else {
+    box.innerHTML = results.map(r => `
+      <div class="llm-suggest-item">
+        <div class="llm-suggest-head" onmousedown="event.preventDefault(); pickCustomModelName('${esc(r.name)}')">
+          <span class="llm-suggest-name">${esc(r.title)}</span>
+          <span class="llm-suggest-desc">${esc(r.description)}</span>
+        </div>
+        ${r.sizes.length ? `<div class="llm-suggest-sizes">
+          ${r.sizes.map(s => `<button class="llm-suggest-size"
+              onmousedown="event.preventDefault(); pickCustomModelName('${esc(r.name)}:${esc(s)}')">${esc(s)}</button>`).join('')}
+        </div>` : ''}
+      </div>`).join('');
+  }
+  box.classList.remove('hidden');
+}
+
+function pickCustomModelName(name) {
+  q('custom-model-name').value = name;
+  hideCustomModelSuggestions();
+  const labelEl = q('custom-model-label');
+  if (labelEl && !labelEl.value.trim()) {
+    labelEl.value = name.replace(/[:\-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+}
+
+function hideCustomModelSuggestions() {
+  const box = q('custom-model-suggestions');
+  if (box) { box.classList.add('hidden'); box.innerHTML = ''; }
+}
+
+async function addCustomModel() {
+  const name  = (q('custom-model-name')?.value || '').trim();
+  const label = (q('custom-model-label')?.value || '').trim();
+  if (!name) { toast('Enter the exact Ollama model tag first', 'error'); return; }
+  const btn = q('add-custom-model-btn');
+  btn.disabled = true; btn.textContent = 'Checking registry…';
+  try {
+    await apiFetch('/api/llm/custom-models', {
+      method: 'POST',
+      body: JSON.stringify({ name, label }),
+    });
+    toast(`Added "${name}" as a chip`, 'success');
+    pageSettings();
+  } catch(e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = '+ Add chip'; }
+}
+
+async function removeCustomModel(name) {
+  if (!confirm(`Remove the "${name}" chip? This doesn't affect any already-pulled model.`)) return;
+  try {
+    await apiFetch(`/api/llm/custom-models/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    toast(`Removed "${name}" chip`, 'success');
+    pageSettings();
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 function fillPullInput(name) {
@@ -1782,16 +2248,25 @@ function fillPullInput(name) {
 // Restricts the quant dropdown to levels actually published for the currently
 // typed/selected model (see POPULAR_MODELS.quantLevels); shows all of them for
 // anything not in the curated list, since we don't know its real availability.
+// When the model is in the curated list, also appends the real download size
+// per level (see POPULAR_MODELS.quantSizes) so an admin can weigh size vs.
+// quality before pulling — omitted for anything not in the curated list since
+// we don't know its real per-quant size.
 function updateQuantOptions() {
   const select = q('pull-quant');
   if (!select) return;
   const rawName = (q('pull-input')?.value || '').trim();
-  const known    = POPULAR_MODELS.find(m => m.name === rawName);
+  const known    = findKnownModel(rawName);
   const allowed  = known?.quantLevels || null;
+  const sizes    = known?.quantSizes || null;
   const current  = select.value;
   select.innerHTML = QUANT_LEVELS
     .filter(o => !o.value || !allowed || allowed.includes(o.value))
-    .map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+    .map(o => {
+      const raw = sizes?.[o.value];
+      const size = typeof raw === 'number' ? fmtBytes(raw) : raw;
+      return `<option value="${esc(o.value)}">${esc(o.label)}${size ? ` (${esc(size)})` : ''}</option>`;
+    }).join('');
   if ([...select.options].some(o => o.value === current)) select.value = current;
 }
 

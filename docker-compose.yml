@@ -164,6 +164,7 @@ services:
       KEYCLOAK_URL: http://keycloak:8080/auth
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-ekap}
       REQUIRE_AUTH: ${REQUIRE_AUTH:-false}
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

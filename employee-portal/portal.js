@@ -535,7 +535,16 @@ async function sendMessage() {
         wrap.appendChild(statLine);
       }
 
-      const GPU_LABEL = { gpu: '⚙ Using GPU', 'gpu-partial': '⚙ Using GPU (partial offload)', cpu: '⚙ Using CPU' };
+      const GPU_LABEL = {
+        gpu: '⚙ Using GPU', 'gpu-partial': '⚙ Using GPU (partial offload)', cpu: '⚙ Using CPU',
+        // Set instead of a GPU reading when an admin-configured external
+        // provider answered this turn instead of the self-hosted model —
+        // covers every EXTERNAL_PROVIDERS entry in retrieval-service/main.py,
+        // so a new provider added there doesn't silently lose its cloud badge here.
+        openai: '☁ Using OpenAI (cloud)', anthropic: '☁ Using Anthropic (cloud)',
+        deepseek: '☁ Using DeepSeek (cloud)', google: '☁ Using Google AI Studio (cloud)',
+        grok: '☁ Using Grok (cloud)',
+      };
       const gpuLabel = GPU_LABEL[stats?.gpu];
       if (gpuLabel) {
         const gpuLine = document.createElement('div');
@@ -603,7 +612,11 @@ async function loadChatModel() {
   try {
     const config = await apiFetch('/api/llm/config');
     _chatConfig = config;
-    q('chat-model-badge').textContent = (config.show_model_name && config.model) ? ` · ${config.model}` : '';
+    // active_model reflects whichever backend is actually answering chat right
+    // now (local or an admin-selected external provider) — plain "model" is
+    // always the local Ollama/vLLM setting even when it's not what's live.
+    const activeModel = config.active_model ?? config.model;
+    q('chat-model-badge').textContent = (config.show_model_name && activeModel) ? ` · ${activeModel}` : '';
   } catch(e) { /* badge just stays empty if this fails */ }
 }
 
