@@ -365,6 +365,8 @@ function renderFolderTree(nodes, depth = 0) {
       <div class="folder-actions">
         <a class="btn btn-xs btn-ghost" href="#/documents?folder=${f.folder_id}">View Docs</a>
         <button class="btn btn-xs btn-ghost"
+          onclick='createFolder("${f.folder_id}","${esc(f.name)}")'>+ Subfolder</button>
+        <button class="btn btn-xs btn-ghost"
           onclick='renameFolder("${f.folder_id}","${esc(f.name)}")'>Rename</button>
         <button class="btn btn-xs btn-danger"
           onclick='deleteFolder("${f.folder_id}","${esc(f.name)}")'>Delete</button>
@@ -373,15 +375,20 @@ function renderFolderTree(nodes, depth = 0) {
     </li>`).join('')}</ul>`;
 }
 
-async function createFolder() {
-  const name = prompt('Folder name:'); if (!name?.trim()) return;
+// parentId/parentName are omitted for a root-level folder (the "+ New Folder"
+// button); passed when created via a folder's own "+ Subfolder" action —
+// the backend (parent_folder_id) and renderFolderTree() above already
+// support arbitrary nesting depth, this was the only missing piece.
+async function createFolder(parentId = null, parentName = '') {
+  const name = prompt(parentId ? `Subfolder name (inside "${parentName}"):` : 'Folder name:');
+  if (!name?.trim()) return;
   const dept = prompt('Department (optional):') || '';
   try {
     await apiFetch('/api/folders', {
       method: 'POST',
-      body: JSON.stringify({ name: name.trim(), owner: 'admin', department: dept }),
+      body: JSON.stringify({ name: name.trim(), owner: 'admin', department: dept, parent_folder_id: parentId }),
     });
-    toast('Folder created', 'success');
+    toast(parentId ? 'Subfolder created' : 'Folder created', 'success');
     pageFolders();
   } catch(e) { toast(e.message, 'error'); }
 }
@@ -395,7 +402,7 @@ async function renameFolder(id, old_name) {
 }
 
 async function deleteFolder(id, name) {
-  if (!confirm(`Delete folder "${name}"?\nDocuments inside will be moved to root.`)) return;
+  if (!confirm(`Delete folder "${name}"?\nAny subfolders inside it will be deleted too. Documents inside (including in those subfolders) will be moved to root, not deleted.`)) return;
   try {
     await apiFetch(`/api/folders/${id}`, { method: 'DELETE' });
     toast('Folder deleted', 'success'); pageFolders();
