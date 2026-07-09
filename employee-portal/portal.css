@@ -263,21 +263,9 @@ body { background: var(--c-bg); color: var(--c-text); font-size: 14px; line-heig
 }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* sources */
-.chat-sources {
-  font-size: 11px; color: var(--c-muted);
-  display: flex; flex-direction: column; gap: 3px; margin-top: 4px; max-width: 88%;
-}
-.chat-source-item {
-  display: flex; align-items: center; gap: 5px;
-  background: var(--c-bg); border: 1px solid var(--c-border);
-  border-radius: 5px; padding: 3px 8px;
-}
-.chat-source-num { font-weight: 700; color: var(--c-primary); }
-.chat-source-clickable { cursor: pointer; }
-.chat-source-clickable:hover { border-color: var(--c-primary); background: #eff6ff; }
-
-/* inline [Source N] markers within a streamed reply */
+/* inline [Source N] markers within a streamed reply — the only citation UI
+   now; a separate clickable source-chip list used to be appended below each
+   reply too, but that just duplicated these same links. */
 .chat-citation-ref {
   cursor: pointer; color: var(--c-primary); font-weight: 600;
   text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px;

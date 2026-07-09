@@ -518,30 +518,11 @@ async function sendMessage() {
     bubble.classList.remove('streaming');
     _chatHistory.push({ role: 'assistant', content: fullText });
 
-    // Real citation data (document_id/title/page) lets both the inline
-    // [Source N] markers and the chip list below open the actual source
-    // document instead of being static text.
+    // Real citation data (document_id/title/page) lets the inline [Source N]
+    // markers open the actual source document instead of being static text.
     const citByNum = {};
     for (const c of stats?.citations || []) citByNum[c.source_num] = c;
     bubble.innerHTML = linkifyCitations(fullText, citByNum);
-
-    const sourceNums = [...new Set([...fullText.matchAll(/\[Source (\d+)[^\]]*\]/g)].map(m => m[1]))];
-    if (sourceNums.length) {
-      const src = document.createElement('div');
-      src.className = 'chat-sources';
-      src.innerHTML = sourceNums.map(n => {
-        const c = citByNum[n];
-        if (!c) return `<div class="chat-source-item"><span class="chat-source-num">[${n}]</span> Knowledge base</div>`;
-        const label = `${c.document_title}${c.page_number ? ` · p.${c.page_number}` : ''}`;
-        const meta  = attrJson({ file_type: c.page_number ? `Page ${c.page_number}` : '', department: c.section || '' });
-        return `<div class="chat-source-item chat-source-clickable"
-                     onclick='openPreview(${attrJson(c.document_id)},${attrJson(c.document_title)},${meta},${attrJson(c.page_number)})'>
-                  <span class="chat-source-num">[${n}]</span> ${esc(label)}
-                </div>`;
-      }).join('');
-      wrap.appendChild(src);
-      scrollBottom();
-    }
 
     if (_chatConfig.show_stats) {
       const statParts = stats
