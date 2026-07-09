@@ -448,12 +448,44 @@ async function deleteFolder(id, name) {
 
 /* ── Approval Queue ─────────────────────────────────────────────────────────── */
 async function pageQueue() {
-  const data = await apiFetch('/api/workflow/pending');
-  const docs = data.pending || [];
-  updateQueueBadge(docs.length);
+  const data    = await apiFetch('/api/workflow/pending');
+  const docs    = data.pending || [];
+  const changes = data.pending_changes || [];
+  updateQueueBadge(docs.length + changes.length);
   q('content').innerHTML = `
     <div class="page-header"><h1>Approval Queue</h1></div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h2>Pending Changes</h2></div>
+      <p style="padding:12px 20px 0;font-size:12.5px;color:var(--c-muted)">
+        Edits or deletions made by someone other than the document's owner — staged here until the
+        owner (shown below) approves them. Nothing here has taken effect yet.
+      </p>
+      <div style="padding-bottom:4px">
+      ${!changes.length
+        ? '<div class="empty"><div class="empty-icon">✅</div><p>No pending changes.</p></div>'
+        : `<div class="table-wrap"><table class="data-table"><thead><tr>
+            <th>Document</th><th>Owner</th><th>Requested Change</th><th>Requested By</th><th>Requested</th><th>Actions</th>
+          </tr></thead><tbody>
+          ${changes.map(c => `<tr>
+            <td>${esc(c.title)}</td>
+            <td>${esc(c.owner||'—')}</td>
+            <td>${describeChange(c)}</td>
+            <td>${esc(c.requested_by)}</td>
+            <td>${fmt(c.requested_at)}</td>
+            <td class="actions">
+              <button class="btn btn-xs btn-success"
+                onclick="decideChange('${esc(c.id)}','approve','${esc(c.title)}')">Approve</button>
+              <button class="btn btn-xs btn-danger"
+                onclick="decideChange('${esc(c.id)}','reject','${esc(c.title)}')">Reject</button>
+            </td>
+          </tr>`).join('')}
+          </tbody></table></div>`}
+      </div>
+    </div>
+
     <div class="card">
+      <div class="card-head"><h2>Content Review</h2></div>
       ${!docs.length
         ? '<div class="empty"><div class="empty-icon">✅</div><p>No documents awaiting approval.</p></div>'
         : `<div class="table-wrap"><table class="data-table"><thead><tr>
