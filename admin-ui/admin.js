@@ -120,6 +120,43 @@ const ST_BADGE = {
   completed: 'badge-completed', failed: 'badge-failed',
 };
 const badge = (txt, cls) => `<span class="badge ${cls || 'badge-outline'}">${esc(txt)}</span>`;
+
+const CLASSIFICATION_LEVELS = ['Public', 'Internal', 'Confidential', 'Restricted'];
+
+function classificationSelectHTML(d) {
+  return `<select class="filter-select" style="font-size:11.5px;padding:2px 6px" data-current="${esc(d.classification)}"
+            onchange="changeClassification(${attrJson(d.document_id)},${attrJson(d.title)},this)">
+    ${CLASSIFICATION_LEVELS.map(c => `<option value="${c}" ${d.classification === c ? 'selected' : ''}>${c}</option>`).join('')}
+  </select>`;
+}
+
+async function changeClassification(docId, title, selectEl) {
+  const newClass = selectEl.value;
+  const oldClass = selectEl.dataset.current;
+  if (newClass === oldClass) return;
+  if (!confirm(`Change "${title}" classification from ${oldClass} to ${newClass}?\nThis changes who can see this document.`)) {
+    selectEl.value = oldClass;
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/documents/${docId}/classification`, {
+      method: 'PUT',
+      body: JSON.stringify({ classification: newClass }),
+    });
+    if (res.status === 'pending_approval') {
+      // Not applied yet — revert the visible dropdown to the real current
+      // value until the owner approves it in the Approval Queue.
+      selectEl.value = oldClass;
+      toast(`"${title}" classification change to ${newClass} sent to ${res.owner} for approval`, 'info');
+    } else {
+      selectEl.dataset.current = newClass;
+      toast(`"${title}" classification changed to ${newClass}`, 'success');
+    }
+  } catch(e) {
+    selectEl.value = oldClass;
+    toast(e.message, 'error');
+  }
+}
 const lcBadge = s => badge(s || 'draft', LC_BADGE[s] || 'badge-draft');
 const stBadge = s => badge(s || '—', ST_BADGE[s] || 'badge-outline');
 
@@ -314,7 +351,7 @@ function renderTable(docs, withActions) {
        onclick='openPreview(${attrJson(d.document_id)},${attrJson(d.title)},${attrJson(d)})'>${esc(d.title)}</a></td>
     <td>${esc(d.owner||'—')}</td>
     <td>${esc(d.department||'—')}</td>
-    <td>${badge(d.classification,'badge-outline')}</td>
+    <td>${withActions ? classificationSelectHTML(d) : badge(d.classification,'badge-outline')}</td>
     <td>${esc(d.file_type||'—')}</td>
     <td><a class="link" href="javascript:void(0)" title="View audit trail"
        onclick='openAuditTrail(${attrJson(d.document_id)},${attrJson(d.title)})'>v${esc(d.current_version || 1)}</a></td>
@@ -439,6 +476,36 @@ async function pageQueue() {
           </tr>`).join('')}
           </tbody></table></div>`}
     </div>`;
+}
+
+function describeChange(c) {
+  const p = c.payload || {};
+  switch (c.change_type) {
+    case 'classification':     return `Classification: ${esc(p.previous)} → ${esc(p.classification)}`;
+    case 'folder_move':        return p.folder_id ? 'Move to a different folder' : 'Move to root (no folder)';
+    case 'delete':             return 'Delete this document';
+    case 'legal_hold_set':     return `Place legal hold: "${esc(p.reason || '')}"`;
+    case 'legal_hold_release': return 'Release legal hold';
+    case 'new_version':        return `Upload new version: ${esc(p.original_filename || 'file')}`
+                                       + (p.change_note ? ` — ${esc(p.change_note)}` : '');
+    default:                   return esc(c.change_type);
+  }
+}
+
+async function decideChange(changeId, action, title) {
+  let comment = '';
+  if (action === 'reject') {
+    comment = prompt(`Reason for rejecting the change to "${title}"? (optional)`);
+    if (comment === null) return; // cancelled
+  }
+  try {
+    await apiFetch(`/api/workflow/changes/${changeId}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ comment: comment || '' }),
+    });
+    toast(`Change ${action === 'approve' ? 'approved' : 'rejected'}`, 'success');
+    pageQueue();
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 /* ── Trash ──────────────────────────────────────────────────────────────────── */
@@ -744,7 +811,9 @@ async function submitVersionUpload(e) {
     const res = await fetch(`/api/documents/${_versionDocId}/versions/upload`, { method: 'POST', body: fd });
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     if (!res.ok) throw new Error(body.detail);
-    toast(`Version ${body.version} queued for processing`, 'success');
+    toast(body.status === 'pending_approval'
+      ? `New version sent to ${body.owner} for approval`
+      : `Version ${body.version} queued for processing`, body.status === 'pending_approval' ? 'info' : 'success');
     closeVersionModal();
     router();
   } catch(e) { toast(e.message, 'error'); }
@@ -1189,8 +1258,10 @@ async function reindexDoc(id, title) {
 async function doDelete(id, title) {
   if (!confirm(`Move "${title}" to trash?`)) return;
   try {
-    await apiFetch(`/api/documents/${id}`, { method: 'DELETE' });
-    toast(`"${title}" moved to trash`, 'success');
+    const res = await apiFetch(`/api/documents/${id}`, { method: 'DELETE' });
+    toast(res.status === 'pending_approval'
+      ? `Deleting "${title}" sent to ${res.owner} for approval`
+      : `"${title}" moved to trash`, res.status === 'pending_approval' ? 'info' : 'success');
     router();
   } catch(e) { toast(e.message, 'error'); }
 }
@@ -1199,11 +1270,13 @@ async function setLegalHold(id, title) {
   const reason = prompt(`Reason for placing "${title}" under legal hold:`);
   if (!reason?.trim()) return;
   try {
-    await apiFetch(`/api/documents/${id}/legal-hold`, {
+    const res = await apiFetch(`/api/documents/${id}/legal-hold`, {
       method: 'POST',
       body: JSON.stringify({ reason: reason.trim() }),
     });
-    toast(`"${title}" placed under legal hold`, 'success');
+    toast(res.status === 'pending_approval'
+      ? `Legal hold on "${title}" sent to ${res.owner} for approval`
+      : `"${title}" placed under legal hold`, res.status === 'pending_approval' ? 'info' : 'success');
     router();
   } catch(e) { toast(e.message, 'error'); }
 }
@@ -1211,8 +1284,10 @@ async function setLegalHold(id, title) {
 async function releaseLegalHold(id, title) {
   if (!confirm(`Release the legal hold on "${title}"? It becomes eligible for retention actions again.`)) return;
   try {
-    await apiFetch(`/api/documents/${id}/legal-hold`, { method: 'DELETE' });
-    toast(`Legal hold released for "${title}"`, 'success');
+    const res = await apiFetch(`/api/documents/${id}/legal-hold`, { method: 'DELETE' });
+    toast(res.status === 'pending_approval'
+      ? `Releasing the hold on "${title}" sent to ${res.owner} for approval`
+      : `Legal hold released for "${title}"`, res.status === 'pending_approval' ? 'info' : 'success');
     router();
   } catch(e) { toast(e.message, 'error'); }
 }
@@ -1815,8 +1890,8 @@ function updateQueueBadge(n) {
 
 async function refreshQueueBadge() {
   try {
-    const d = await apiFetch('/api/documents?lifecycle_state=review&limit=1');
-    updateQueueBadge(d.total);
+    const d = await apiFetch('/api/workflow/pending');
+    updateQueueBadge((d.count || 0) + (d.pending_changes_count || 0));
   } catch {}
 }
 

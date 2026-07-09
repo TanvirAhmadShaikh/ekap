@@ -174,6 +174,28 @@ CREATE TABLE IF NOT EXISTS document_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_document_versions_doc ON document_versions(document_id);
 
+-- Changes made by someone other than a document's owner (classification,
+-- folder move, delete, legal hold, new version) are staged here instead of
+-- applying immediately, and only take effect once the owner (or an
+-- administrator) approves them. A change made by the owner themselves never
+-- goes through this table — see can_apply_immediately() in dms.py.
+CREATE TABLE IF NOT EXISTS pending_changes (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id      UUID NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+    change_type      TEXT NOT NULL CHECK (change_type IN
+                          ('classification', 'folder_move', 'delete', 'legal_hold_set', 'legal_hold_release', 'new_version')),
+    payload          JSONB NOT NULL DEFAULT '{}',
+    requested_by     TEXT NOT NULL,
+    requested_by_id  TEXT NOT NULL,
+    requested_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    decided_by       TEXT,
+    decided_at       TIMESTAMPTZ,
+    decision_comment TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_changes_document ON pending_changes(document_id);
+CREATE INDEX IF NOT EXISTS idx_pending_changes_pending  ON pending_changes(status) WHERE status = 'pending';
+
 -- Workflow audit trail
 CREATE TABLE IF NOT EXISTS workflow_transitions (
     transition_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

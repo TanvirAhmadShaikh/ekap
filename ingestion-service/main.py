@@ -835,7 +835,7 @@ async def get_document(document_id: str, user: UserContext = Depends(get_user_co
         conn.close()
 
 
-@app.delete("/api/documents/{document_id}", status_code=204)
+@app.delete("/api/documents/{document_id}")
 async def delete_document(
     document_id: str,
     user: UserContext = Depends(get_user_context),
@@ -846,24 +846,62 @@ async def delete_document(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT document_id, title FROM documents WHERE document_id = %s AND deleted_at IS NULL",
+                "SELECT document_id, title, owner FROM documents WHERE document_id = %s AND deleted_at IS NULL",
                 (document_id,),
             )
             row = cur.fetchone()
             if not row:
                 raise HTTPException(404, "Document not found.")
-            title = row[1]
-            # Soft delete: mark deleted, leave vectors intact (still retrievable via restored copies)
+            title, owner = row[1], row[2]
+
+            # A change applies immediately only when the actor IS the
+            # document's owner (see can_apply_immediately in routers/dms.py) —
+            # anyone else's delete is staged in pending_changes until the
+            # owner approves it.
+            if user.username == owner:
+                # Soft delete: mark deleted, leave vectors intact (still retrievable via restored copies)
+                cur.execute(
+                    "UPDATE documents SET deleted_at=NOW(), updated_at=NOW(), lifecycle_state='archived' "
+                    "WHERE document_id=%s",
+                    (document_id,),
+                )
+                # Any other still-pending change (e.g. someone else's earlier
+                # classification request) has nothing left to apply to —
+                # auto-reject rather than leave it approvable against a
+                # now-deleted document. Mirrors approve_pending_change's own
+                # cascade for the delete-via-approval path in routers/dms.py.
+                cur.execute(
+                    "SELECT id, change_type, payload FROM pending_changes "
+                    "WHERE document_id=%s AND status='pending'",
+                    (document_id,),
+                )
+                for orphan_id, orphan_type, orphan_payload in cur.fetchall():
+                    if orphan_type == "new_version":
+                        staged = Path(orphan_payload.get("staged_path", ""))
+                        if staged.exists():
+                            staged.unlink(missing_ok=True)
+                    cur.execute(
+                        "UPDATE pending_changes SET status='rejected', decided_by=%s, decided_at=NOW(), "
+                        "decision_comment=%s WHERE id=%s",
+                        (user.username, "Auto-rejected: document was deleted.", orphan_id),
+                    )
+                conn.commit()
+                await audit(user.user_id, "DOCUMENT_DELETE", resource_id=document_id,
+                            details={"title": title, "username": user.username})
+                return {"status": "deleted", "document_id": document_id}
+
+            change_id = str(uuid.uuid4())
             cur.execute(
-                "UPDATE documents SET deleted_at=NOW(), updated_at=NOW(), lifecycle_state='archived' "
-                "WHERE document_id=%s",
-                (document_id,),
+                "INSERT INTO pending_changes (id, document_id, change_type, payload, requested_by, requested_by_id) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (change_id, document_id, "delete", json.dumps({}), user.username, user.user_id),
             )
         conn.commit()
+        await audit(user.user_id, "CHANGE_REQUESTED", resource_id=document_id,
+                    details={"change_type": "delete", "owner": owner, "username": user.username})
+        return {"status": "pending_approval", "document_id": document_id, "change_id": change_id, "owner": owner}
     finally:
         conn.close()
-    await audit(user.user_id, "DOCUMENT_DELETE", resource_id=document_id,
-                details={"title": title, "username": user.username})
 
 
 @app.post("/api/documents/{document_id}/cancel-processing")

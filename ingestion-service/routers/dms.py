@@ -103,6 +103,28 @@ def _record_transition(cur, document_id: str, from_state: str, to_state: str,
     )
 
 
+# ── Owner-approval gate ─────────────────────────────────────────────────────────
+# A change to a document (classification, folder move, delete, legal hold,
+# new version) applies immediately only when the actor IS that document's
+# owner. Anyone else's change is staged in pending_changes and only takes
+# effect once the owner approves it — see approve_pending_change below.
+# Deliberately no admin/knowledge-manager bypass: the rule is unconditional.
+
+def can_apply_immediately(user: UserContext, doc: dict) -> bool:
+    return user.username == doc["owner"]
+
+
+def _create_pending_change(cur, document_id: str, change_type: str, payload: dict,
+                            user: UserContext, change_id: str | None = None) -> str:
+    change_id = change_id or str(uuid.uuid4())
+    cur.execute(
+        "INSERT INTO pending_changes (id, document_id, change_type, payload, requested_by, requested_by_id) "
+        "VALUES (%s,%s,%s,%s,%s,%s)",
+        (change_id, document_id, change_type, json.dumps(payload), user.username, user.user_id),
+    )
+    return change_id
+
+
 # ── Branding ───────────────────────────────────────────────────────────────────
 # Company/organization name shown in the admin sidebar and Employee Portal
 # topbar. Read is unrestricted (any authenticated caller — both UIs need it to
@@ -297,19 +319,69 @@ async def move_document_to_folder(
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM documents WHERE document_id=%s AND deleted_at IS NULL", (document_id,))
-            if not cur.fetchone():
-                raise HTTPException(404, "Document not found.")
+            doc = _require_doc(cur, document_id)
             if folder_id:
                 cur.execute("SELECT 1 FROM folders WHERE folder_id=%s", (folder_id,))
                 if not cur.fetchone():
                     raise HTTPException(404, "Folder not found.")
-            cur.execute("UPDATE documents SET folder_id=%s, updated_at=NOW() WHERE document_id=%s",
-                        (folder_id, document_id))
+
+            if can_apply_immediately(user, doc):
+                cur.execute("UPDATE documents SET folder_id=%s, updated_at=NOW() WHERE document_id=%s",
+                            (folder_id, document_id))
+                result = {"status": "moved", "document_id": document_id, "folder_id": folder_id}
+            else:
+                change_id = _create_pending_change(cur, document_id, "folder_move",
+                    {"folder_id": folder_id, "previous_folder_id": doc.get("folder_id")}, user)
+                _audit(cur, user.user_id, "CHANGE_REQUESTED", document_id,
+                       {"change_type": "folder_move", "to": folder_id, "owner": doc["owner"]})
+                result = {"status": "pending_approval", "document_id": document_id,
+                          "change_id": change_id, "owner": doc["owner"]}
         conn.commit()
+        return result
     finally:
         conn.close()
-    return {"status": "moved", "document_id": document_id, "folder_id": folder_id}
+
+
+VALID_CLASSIFICATIONS = ("Public", "Internal", "Confidential", "Restricted")
+
+
+@router.put("/api/documents/{document_id}/classification")
+async def set_classification(document_id: str, request: Request, user: UserContext = Depends(get_user_context)):
+    # Changes who can see the document (see get_permitted_doc_ids in
+    # retrieval-service) — same bar as legal hold / permissions changes.
+    if not user.can_manage_documents():
+        raise HTTPException(403, "Requires knowledge-manager or higher.")
+    body = await request.json()
+    classification = (body.get("classification") or "").strip()
+    if classification not in VALID_CLASSIFICATIONS:
+        raise HTTPException(400, f"classification must be one of {list(VALID_CLASSIFICATIONS)}.")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            doc = _require_doc(cur, document_id)
+            if doc["classification"] == classification:
+                result = {"status": "unchanged", "document_id": document_id, "classification": classification}
+            elif can_apply_immediately(user, doc):
+                cur.execute(
+                    "UPDATE documents SET classification=%s, updated_at=NOW() WHERE document_id=%s",
+                    (classification, document_id),
+                )
+                _audit(cur, user.user_id, "CLASSIFICATION_CHANGED", document_id, {
+                    "title": doc["title"], "from": doc["classification"], "to": classification,
+                })
+                result = {"status": "updated", "document_id": document_id, "classification": classification}
+            else:
+                change_id = _create_pending_change(cur, document_id, "classification",
+                    {"classification": classification, "previous": doc["classification"]}, user)
+                _audit(cur, user.user_id, "CHANGE_REQUESTED", document_id,
+                       {"change_type": "classification", "to": classification, "owner": doc["owner"]})
+                result = {"status": "pending_approval", "document_id": document_id,
+                          "change_id": change_id, "owner": doc["owner"]}
+        conn.commit()
+        return result
+    finally:
+        conn.close()
 
 
 # ── Versions ──────────────────────────────────────────────────────────────────
@@ -354,35 +426,54 @@ async def upload_new_version(
     try:
         with conn.cursor() as cur:
             doc = _require_doc(cur, document_id)
-            new_ver = doc["current_version"] + 1
-            dest = UPLOAD_DIR / document_id / f"v{new_ver}_{safe_filename(file.filename)}"
-            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            if can_apply_immediately(user, doc):
+                new_ver = doc["current_version"] + 1
+                dest = UPLOAD_DIR / document_id / f"v{new_ver}_{safe_filename(file.filename)}"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                content = await file.read()
+                dest.write_bytes(content)
+                file_size    = dest.stat().st_size
+                content_hash = hashlib.sha256(content).hexdigest()
+                cur.execute(
+                    "INSERT INTO document_versions (document_id, version_number, file_path, file_type, "
+                    "file_size, uploaded_by, change_note) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (document_id, new_ver, str(dest), suffix, file_size, user.username, change_note),
+                )
+                cur.execute(
+                    "UPDATE documents SET file_path=%s, file_type=%s, current_version=%s, content_hash=%s, "
+                    "status='pending', lifecycle_state='draft', updated_at=NOW() WHERE document_id=%s",
+                    (str(dest), suffix, new_ver, content_hash, document_id),
+                )
+                _record_transition(cur, document_id, doc["lifecycle_state"], "draft", user,
+                                   f"Version {new_ver} uploaded")
+                conn.commit()
+                metadata = {
+                    "title": doc["title"], "owner": doc["owner"],
+                    "department": doc["department"], "classification": doc["classification"],
+                }
+                background_tasks.add_task(_run_pipeline, document_id, dest, suffix, metadata)
+                return {"status": "queued", "document_id": document_id, "version": new_ver}
+
+            # Staged under UPLOAD_DIR/<doc>/_pending/ instead of becoming a real
+            # version yet — approve_pending_change() below does the actual
+            # document_versions insert + documents update once the owner signs off.
+            change_id = str(uuid.uuid4())
+            staged = UPLOAD_DIR / document_id / "_pending" / f"{change_id}{suffix}"
+            staged.parent.mkdir(parents=True, exist_ok=True)
             content = await file.read()
-            dest.write_bytes(content)
-            file_size    = dest.stat().st_size
-            content_hash = hashlib.sha256(content).hexdigest()
-            cur.execute(
-                "INSERT INTO document_versions (document_id, version_number, file_path, file_type, "
-                "file_size, uploaded_by, change_note) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (document_id, new_ver, str(dest), suffix, file_size, user.username, change_note),
-            )
-            cur.execute(
-                "UPDATE documents SET file_path=%s, file_type=%s, current_version=%s, content_hash=%s, "
-                "status='pending', lifecycle_state='draft', updated_at=NOW() WHERE document_id=%s",
-                (str(dest), suffix, new_ver, content_hash, document_id),
-            )
-            _record_transition(cur, document_id, doc["lifecycle_state"], "draft", user,
-                               f"Version {new_ver} uploaded")
-        conn.commit()
+            staged.write_bytes(content)
+            _create_pending_change(cur, document_id, "new_version", {
+                "staged_path": str(staged), "suffix": suffix,
+                "original_filename": file.filename, "change_note": change_note,
+            }, user, change_id=change_id)
+            _audit(cur, user.user_id, "CHANGE_REQUESTED", document_id,
+                   {"change_type": "new_version", "owner": doc["owner"]})
+            conn.commit()
+            return {"status": "pending_approval", "document_id": document_id,
+                    "change_id": change_id, "owner": doc["owner"]}
     finally:
         conn.close()
-
-    metadata = {
-        "title": doc["title"], "owner": doc["owner"],
-        "department": doc["department"], "classification": doc["classification"],
-    }
-    background_tasks.add_task(_run_pipeline, document_id, dest, suffix, metadata)
-    return {"status": "queued", "document_id": document_id, "version": new_ver}
 
 
 @router.post("/api/documents/{document_id}/versions/{version_number}/restore", status_code=202)
@@ -980,34 +1071,51 @@ async def set_legal_hold(document_id: str, request: Request, user: UserContext =
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _require_doc(cur, document_id)
-            cur.execute(
-                "UPDATE documents SET legal_hold=TRUE, legal_hold_reason=%s, "
-                "legal_hold_set_by=%s, legal_hold_set_at=NOW() WHERE document_id=%s",
-                (reason, user.username, document_id),
-            )
-            _audit(cur, user.user_id, "LEGAL_HOLD_SET", document_id, {"reason": reason, "by": user.username})
+            doc = _require_doc(cur, document_id)
+            if can_apply_immediately(user, doc):
+                cur.execute(
+                    "UPDATE documents SET legal_hold=TRUE, legal_hold_reason=%s, "
+                    "legal_hold_set_by=%s, legal_hold_set_at=NOW() WHERE document_id=%s",
+                    (reason, user.username, document_id),
+                )
+                _audit(cur, user.user_id, "LEGAL_HOLD_SET", document_id, {"reason": reason, "by": user.username})
+                result = {"status": "held", "document_id": document_id}
+            else:
+                change_id = _create_pending_change(cur, document_id, "legal_hold_set", {"reason": reason}, user)
+                _audit(cur, user.user_id, "CHANGE_REQUESTED", document_id,
+                       {"change_type": "legal_hold_set", "owner": doc["owner"]})
+                result = {"status": "pending_approval", "document_id": document_id,
+                          "change_id": change_id, "owner": doc["owner"]}
         conn.commit()
+        return result
     finally:
         conn.close()
-    return {"status": "held", "document_id": document_id}
 
 
-@router.delete("/api/documents/{document_id}/legal-hold", status_code=204)
+@router.delete("/api/documents/{document_id}/legal-hold")
 async def release_legal_hold(document_id: str, user: UserContext = Depends(get_user_context)):
     if not user.can_manage_documents():
         raise HTTPException(403, "Requires knowledge-manager or higher.")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _require_doc(cur, document_id)
-            cur.execute(
-                "UPDATE documents SET legal_hold=FALSE, legal_hold_reason=NULL, "
-                "legal_hold_set_by=NULL, legal_hold_set_at=NULL WHERE document_id=%s",
-                (document_id,),
-            )
-            _audit(cur, user.user_id, "LEGAL_HOLD_RELEASED", document_id, {"by": user.username})
+            doc = _require_doc(cur, document_id)
+            if can_apply_immediately(user, doc):
+                cur.execute(
+                    "UPDATE documents SET legal_hold=FALSE, legal_hold_reason=NULL, "
+                    "legal_hold_set_by=NULL, legal_hold_set_at=NULL WHERE document_id=%s",
+                    (document_id,),
+                )
+                _audit(cur, user.user_id, "LEGAL_HOLD_RELEASED", document_id, {"by": user.username})
+                result = {"status": "released", "document_id": document_id}
+            else:
+                change_id = _create_pending_change(cur, document_id, "legal_hold_release", {}, user)
+                _audit(cur, user.user_id, "CHANGE_REQUESTED", document_id,
+                       {"change_type": "legal_hold_release", "owner": doc["owner"]})
+                result = {"status": "pending_approval", "document_id": document_id,
+                          "change_id": change_id, "owner": doc["owner"]}
         conn.commit()
+        return result
     finally:
         conn.close()
 
@@ -1184,24 +1292,219 @@ async def workflow_history(document_id: str, user: UserContext = Depends(get_use
 
 @router.get("/api/workflow/pending")
 async def pending_reviews(user: UserContext = Depends(get_user_context)):
-    """Documents currently in 'review' state, visible to knowledge-managers."""
-    if not user.can_manage_documents():
-        raise HTTPException(403, "Requires knowledge-manager or higher.")
+    """Two independent queues folded into one response:
+    - "pending": documents in lifecycle_state='review' — the existing content
+      publishing workflow, visible to knowledge-managers/admins only.
+    - "pending_changes": edits/deletions staged because the actor wasn't the
+      document's owner (see pending_changes table) — visible to the owner of
+      the affected document (any role), plus knowledge-managers/admins for
+      oversight. A plain "user" who owns documents gets a non-empty
+      pending_changes list here even though "pending" stays empty for them.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            docs = []
+            if user.can_manage_documents():
+                cur.execute(
+                    "SELECT document_id, title, owner, department, classification, "
+                    "file_type, updated_at "
+                    "FROM documents "
+                    "WHERE lifecycle_state='review' AND deleted_at IS NULL "
+                    "ORDER BY updated_at ASC"
+                )
+                cols = [d[0] for d in cur.description]
+                docs = [dict(zip(cols, r)) for r in cur.fetchall()]
+                for d in docs:
+                    d["updated_at"] = str(d["updated_at"])
+
+            if user.can_manage_documents():
+                cur.execute(
+                    "SELECT pc.id, pc.document_id, pc.change_type, pc.payload, pc.requested_by, "
+                    "pc.requested_at, d.title, d.owner, d.classification "
+                    "FROM pending_changes pc JOIN documents d ON pc.document_id = d.document_id "
+                    "WHERE pc.status='pending' ORDER BY pc.requested_at ASC"
+                )
+            else:
+                cur.execute(
+                    "SELECT pc.id, pc.document_id, pc.change_type, pc.payload, pc.requested_by, "
+                    "pc.requested_at, d.title, d.owner, d.classification "
+                    "FROM pending_changes pc JOIN documents d ON pc.document_id = d.document_id "
+                    "WHERE pc.status='pending' AND d.owner=%s ORDER BY pc.requested_at ASC",
+                    (user.username,),
+                )
+            cols = [d[0] for d in cur.description]
+            changes = [dict(zip(cols, r)) for r in cur.fetchall()]
+            for c in changes:
+                c["requested_at"] = str(c["requested_at"])
+                # The owner reviewing this shouldn't see (or need) our internal
+                # staging path for a not-yet-applied version upload.
+                if c["change_type"] == "new_version" and "staged_path" in c["payload"]:
+                    c["payload"] = {k: v for k, v in c["payload"].items() if k != "staged_path"}
+
+        return {
+            "pending": docs, "count": len(docs),
+            "pending_changes": changes, "pending_changes_count": len(changes),
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/api/workflow/changes/{change_id}/approve")
+async def approve_pending_change(
+    change_id: str, background_tasks: BackgroundTasks,
+    request: Request, user: UserContext = Depends(get_user_context),
+):
+    raw = await request.body()
+    try:
+        comment = ((json.loads(raw) if raw else {}).get("comment") or "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        raise HTTPException(400, "Malformed request body: expected a JSON object.")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT document_id, title, owner, department, classification, "
-                "file_type, updated_at "
-                "FROM documents "
-                "WHERE lifecycle_state='review' AND deleted_at IS NULL "
-                "ORDER BY updated_at ASC"
+                "SELECT document_id, change_type, payload, status, requested_by FROM pending_changes WHERE id=%s",
+                (change_id,),
             )
-            cols = [d[0] for d in cur.description]
-            docs = [dict(zip(cols, r)) for r in cur.fetchall()]
-            for d in docs:
-                d["updated_at"] = str(d["updated_at"])
-        return {"pending": docs, "count": len(docs)}
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "Pending change not found.")
+            doc_id, change_type, payload, status, requested_by = row
+            if status != "pending":
+                raise HTTPException(409, f"This change was already {status}.")
+            doc = _require_doc(cur, doc_id, include_deleted=True)
+            if user.username != doc["owner"] and not user.has_role("administrator", "system-administrator"):
+                raise HTTPException(403, "Only the document's owner can approve this change.")
+
+            if change_type == "classification":
+                cur.execute("UPDATE documents SET classification=%s, updated_at=NOW() WHERE document_id=%s",
+                            (payload["classification"], doc_id))
+            elif change_type == "folder_move":
+                cur.execute("UPDATE documents SET folder_id=%s, updated_at=NOW() WHERE document_id=%s",
+                            (payload.get("folder_id"), doc_id))
+            elif change_type == "delete":
+                cur.execute(
+                    "UPDATE documents SET deleted_at=NOW(), updated_at=NOW(), lifecycle_state='archived' "
+                    "WHERE document_id=%s", (doc_id,),
+                )
+            elif change_type == "legal_hold_set":
+                cur.execute(
+                    "UPDATE documents SET legal_hold=TRUE, legal_hold_reason=%s, "
+                    "legal_hold_set_by=%s, legal_hold_set_at=NOW() WHERE document_id=%s",
+                    (payload["reason"], doc["owner"], doc_id),
+                )
+            elif change_type == "legal_hold_release":
+                cur.execute(
+                    "UPDATE documents SET legal_hold=FALSE, legal_hold_reason=NULL, "
+                    "legal_hold_set_by=NULL, legal_hold_set_at=NULL WHERE document_id=%s",
+                    (doc_id,),
+                )
+            elif change_type == "new_version":
+                staged = Path(payload["staged_path"])
+                if not staged.exists():
+                    raise HTTPException(410, "The staged file for this change is no longer available.")
+                new_ver = doc["current_version"] + 1
+                dest = UPLOAD_DIR / doc_id / f"v{new_ver}_{safe_filename(payload['original_filename'])}"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                content = staged.read_bytes()
+                dest.write_bytes(content)
+                staged.unlink(missing_ok=True)
+                file_size    = dest.stat().st_size
+                content_hash = hashlib.sha256(content).hexdigest()
+                cur.execute(
+                    "INSERT INTO document_versions (document_id, version_number, file_path, file_type, "
+                    "file_size, uploaded_by, change_note) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (doc_id, new_ver, str(dest), payload["suffix"], file_size,
+                     requested_by, payload.get("change_note", "")),
+                )
+                cur.execute(
+                    "UPDATE documents SET file_path=%s, file_type=%s, current_version=%s, content_hash=%s, "
+                    "status='pending', lifecycle_state='draft', updated_at=NOW() WHERE document_id=%s",
+                    (str(dest), payload["suffix"], new_ver, content_hash, doc_id),
+                )
+                _record_transition(cur, doc_id, doc["lifecycle_state"], "draft", user,
+                                   f"Version {new_ver} uploaded (approved change)")
+                background_tasks.add_task(_run_pipeline, doc_id, dest, payload["suffix"], {
+                    "title": doc["title"], "owner": doc["owner"],
+                    "department": doc.get("department"), "classification": doc["classification"],
+                })
+
+            cur.execute(
+                "UPDATE pending_changes SET status='approved', decided_by=%s, decided_at=NOW(), "
+                "decision_comment=%s WHERE id=%s",
+                (user.username, comment, change_id),
+            )
+            _audit(cur, user.user_id, "CHANGE_APPROVED", doc_id,
+                   {"change_type": change_type, "change_id": change_id})
+
+            # A deleted document has nothing left for any other still-pending
+            # change to apply to — auto-reject its siblings instead of leaving
+            # them in the queue where approving one later would silently
+            # mutate an already-trashed document.
+            if change_type == "delete":
+                cur.execute(
+                    "SELECT id, change_type, payload FROM pending_changes "
+                    "WHERE document_id=%s AND status='pending' AND id != %s",
+                    (doc_id, change_id),
+                )
+                orphaned = cur.fetchall()
+                for orphan_id, orphan_type, orphan_payload in orphaned:
+                    if orphan_type == "new_version":
+                        orphan_staged = Path(orphan_payload.get("staged_path", ""))
+                        if orphan_staged.exists():
+                            orphan_staged.unlink(missing_ok=True)
+                    cur.execute(
+                        "UPDATE pending_changes SET status='rejected', decided_by=%s, decided_at=NOW(), "
+                        "decision_comment=%s WHERE id=%s",
+                        (user.username, "Auto-rejected: document was deleted.", orphan_id),
+                    )
+                    _audit(cur, user.user_id, "CHANGE_REJECTED", doc_id,
+                           {"change_type": orphan_type, "change_id": str(orphan_id), "reason": "document_deleted"})
+        conn.commit()
+        return {"status": "approved", "change_id": change_id, "change_type": change_type}
+    finally:
+        conn.close()
+
+
+@router.post("/api/workflow/changes/{change_id}/reject")
+async def reject_pending_change(change_id: str, request: Request, user: UserContext = Depends(get_user_context)):
+    raw = await request.body()
+    try:
+        comment = ((json.loads(raw) if raw else {}).get("comment") or "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        raise HTTPException(400, "Malformed request body: expected a JSON object.")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT document_id, change_type, payload, status FROM pending_changes WHERE id=%s",
+                (change_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "Pending change not found.")
+            doc_id, change_type, payload, status = row
+            if status != "pending":
+                raise HTTPException(409, f"This change was already {status}.")
+            doc = _require_doc(cur, doc_id, include_deleted=True)
+            if user.username != doc["owner"] and not user.has_role("administrator", "system-administrator"):
+                raise HTTPException(403, "Only the document's owner can reject this change.")
+
+            if change_type == "new_version":
+                staged = Path(payload.get("staged_path", ""))
+                if staged.exists():
+                    staged.unlink(missing_ok=True)
+
+            cur.execute(
+                "UPDATE pending_changes SET status='rejected', decided_by=%s, decided_at=NOW(), "
+                "decision_comment=%s WHERE id=%s",
+                (user.username, comment, change_id),
+            )
+            _audit(cur, user.user_id, "CHANGE_REJECTED", doc_id,
+                   {"change_type": change_type, "change_id": change_id})
+        conn.commit()
+        return {"status": "rejected", "change_id": change_id}
     finally:
         conn.close()
 
