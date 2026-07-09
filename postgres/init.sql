@@ -377,3 +377,52 @@ CREATE TABLE IF NOT EXISTS gpu_diagnostics (
     output        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gpu_diagnostics_submitted_at ON gpu_diagnostics(submitted_at DESC);
+
+-- Admin-added "Pull New Model" chips for models outside the built-in curated
+-- list (see admin-ui's POPULAR_MODELS) — download sizes are resolved from the
+-- Ollama registry once, at add time, and cached here rather than re-fetched
+-- on every Settings page load.
+CREATE TABLE IF NOT EXISTS custom_models (
+    name        TEXT PRIMARY KEY,
+    label       TEXT NOT NULL,
+    note        TEXT,
+    quant_sizes JSONB NOT NULL DEFAULT '{}',
+    added_by    TEXT NOT NULL,
+    added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Which chat backend is live and, when it's an external provider, which
+-- classifications may be sent to it as retrieval context. Singleton row
+-- (id is always 1) — unlike the in-memory "Active Model" override, this is
+-- a compliance-relevant setting so it's persisted and survives restarts;
+-- defaults to 'local' / Public-only so a fresh deployment never sends
+-- anything externally until an admin explicitly opts in.
+CREATE TABLE IF NOT EXISTS external_llm_settings (
+    id                      INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    backend                 TEXT NOT NULL DEFAULT 'local'
+                                CHECK (backend IN ('local','openai','anthropic','deepseek','google','grok')),
+    model                   TEXT,
+    allowed_classifications TEXT[] NOT NULL DEFAULT ARRAY['Public'],
+    updated_by              TEXT,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Encrypted API keys for external LLM providers. Encrypted at the application
+-- layer (Fernet, keyed by SECRETS_ENCRYPTION_KEY — never stored in this
+-- table) before insert, so a DB dump/backup alone never exposes a usable key.
+CREATE TABLE IF NOT EXISTS external_llm_credentials (
+    provider    TEXT PRIMARY KEY CHECK (provider IN ('openai','anthropic','deepseek','google','grok')),
+    api_key_enc TEXT NOT NULL,
+    added_by    TEXT NOT NULL,
+    added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Company/organization name shown in the admin sidebar and the Employee
+-- Portal topbar — singleton row, admin-configurable, defaults to "EKAP" so a
+-- fresh deployment still shows something before an admin sets it.
+CREATE TABLE IF NOT EXISTS app_branding (
+    id           INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    company_name TEXT NOT NULL DEFAULT 'EKAP',
+    updated_by   TEXT,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

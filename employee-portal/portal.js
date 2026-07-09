@@ -564,6 +564,15 @@ async function init() {
     toast(e.message, 'error');
   }
   loadChatModel();
+  loadBranding();
+}
+
+async function loadBranding() {
+  try {
+    const { company_name } = await apiFetch('/api/branding');
+    const el = q('topbar-company-name');
+    if (el && company_name) el.textContent = company_name;
+  } catch(e) { /* topbar just keeps showing "EKAP" if this fails */ }
 }
 
 async function loadChatModel() {

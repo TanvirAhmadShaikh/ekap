@@ -103,6 +103,50 @@ def _record_transition(cur, document_id: str, from_state: str, to_state: str,
     )
 
 
+# ── Branding ───────────────────────────────────────────────────────────────────
+# Company/organization name shown in the admin sidebar and Employee Portal
+# topbar. Read is unrestricted (any authenticated caller — both UIs need it to
+# render their header); only the write is admin-gated.
+
+@router.get("/api/branding")
+async def get_branding(user: UserContext = Depends(get_user_context)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT company_name FROM app_branding WHERE id = 1")
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return {"company_name": row[0] if row else "EKAP"}
+
+
+@router.post("/api/branding")
+async def set_branding(request: Request, user: UserContext = Depends(get_user_context)):
+    if not user.can_manage_documents():
+        raise HTTPException(403, "Requires knowledge-manager or higher.")
+    body         = await request.json()
+    company_name = (body.get("company_name") or "").strip()
+    if not company_name:
+        raise HTTPException(400, "company_name is required.")
+    if len(company_name) > 80:
+        raise HTTPException(400, "company_name must be 80 characters or fewer.")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO app_branding (id, company_name, updated_by) VALUES (1, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "  company_name = EXCLUDED.company_name, updated_by = EXCLUDED.updated_by, updated_at = NOW()",
+                (company_name, user.username),
+            )
+            _audit(cur, user.user_id, "BRANDING_CHANGED", None, {"company_name": company_name})
+        conn.commit()
+    finally:
+        conn.close()
+    return {"company_name": company_name}
+
+
 # ── Folders ───────────────────────────────────────────────────────────────────
 
 @router.post("/api/folders", status_code=201)

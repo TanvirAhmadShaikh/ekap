@@ -181,6 +181,7 @@ const PAGES = {
   '/audit-log': pageAuditLog,
   '/settings':  pageSettings,
   '/gpu-setup': pageGpuSetup,
+  '/branding':  pageBranding,
 };
 
 async function router() {
@@ -1558,6 +1559,55 @@ async function submitGpuDiagnostics() {
   }
 }
 
+/* ── Branding ───────────────────────────────────────────────────────────────── */
+// EKAP is the platform name and stays visible in the "EKAP Admin Portal" /
+// "EKAP Knowledge Base" subtitle in both UIs — this only configures the
+// organization name shown above it (e.g. the deploying company/firm's name).
+async function pageBranding() {
+  let current;
+  try { current = (await apiFetch('/api/branding')).company_name; }
+  catch(e) { current = 'EKAP'; }
+
+  q('content').innerHTML = `
+    <div class="page-header"><h1>Branding</h1></div>
+    <div class="card">
+      <div class="card-head"><h2>Organization Name</h2></div>
+      <div style="padding:16px 20px">
+        <p class="llm-note" style="margin-bottom:12px">
+          Shown at the top of this Admin Portal sidebar and the Employee Portal header,
+          above the fixed "EKAP" platform label.
+        </p>
+        <div style="display:flex;gap:8px;max-width:420px">
+          <input class="input" id="company-name-input" style="flex:1" maxlength="80" value="${esc(current)}">
+          <button class="btn btn-primary" id="branding-save-btn" onclick="saveBranding()">Save</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function saveBranding() {
+  const name = (q('company-name-input')?.value || '').trim();
+  if (!name) { toast('Enter an organization name first', 'error'); return; }
+  const btn = q('branding-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await apiFetch('/api/branding', { method: 'POST', body: JSON.stringify({ company_name: name }) });
+    toast('Organization name updated', 'success');
+    applyBrandingToSidebar(name);
+  } catch(e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = 'Save'; }
+}
+
+function applyBrandingToSidebar(name) {
+  const el = q('sidebar-company-name');
+  if (el) el.textContent = name;
+}
+
+async function loadBrandingIntoSidebar() {
+  try { applyBrandingToSidebar((await apiFetch('/api/branding')).company_name); }
+  catch(e) { /* sidebar just keeps showing "EKAP" if this fails */ }
+}
+
 // Collapsed by default every time the Settings page loads — the toggles below
 // are occasional/debug-facing, not something an admin needs open every visit.
 function toggleChatDisplaySettings() {
@@ -1788,6 +1838,7 @@ function init() {
   });
   window.addEventListener('hashchange', router);
   router();
+  loadBrandingIntoSidebar();
   setInterval(refreshQueueBadge, 30000);
   refreshNotifBadge();
   setInterval(refreshNotifBadge, 30000);
