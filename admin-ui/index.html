@@ -219,7 +219,7 @@
 
   <!-- Preview Modal -->
   <div class="overlay hidden" id="preview-modal">
-    <div class="modal modal-xl">
+    <div class="modal modal-xl" id="preview-modal-inner">
       <div class="modal-head">
         <div>
           <h2 class="modal-title" id="preview-title">Preview</h2>
@@ -227,6 +227,8 @@
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <a class="btn btn-ghost" id="preview-download" href="#" download>⬇ Download</a>
+          <button class="btn btn-ghost" id="preview-fullscreen-btn" onclick="togglePreviewFullscreen()"
+                  title="Toggle full screen">Full Screen</button>
           <button class="btn-close" onclick="closePreview()">✕</button>
         </div>
       </div>

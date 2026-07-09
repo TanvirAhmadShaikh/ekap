@@ -1222,6 +1222,28 @@ def _iter_file(path: Path, chunk_size: int = 1 << 20):
             yield chunk
 
 
+def _make_scrollable(html: str) -> str:
+    """Guarantees a horizontal scrollbar for wide preview content (long CSV/TXT
+    lines, wide spreadsheet tables) instead of it being silently clipped at the
+    iframe's edge. Applied once, after any truncation — _truncate_html_body
+    above rebuilds truncated docs as bare <html><body>...</body></html>,
+    dropping whatever <head><style> the original converter set, so injecting
+    this per-converter wouldn't survive truncation; this runs unconditionally
+    on the final HTML instead."""
+    soup = BeautifulSoup(html, "html.parser")
+    style_tag = soup.new_tag("style")
+    style_tag.string = "html,body{margin:0} body{overflow-x:auto} pre{overflow-x:auto}"
+    if soup.head:
+        soup.head.append(style_tag)
+    elif soup.html:
+        head = soup.new_tag("head")
+        head.append(style_tag)
+        soup.html.insert(0, head)
+    else:
+        return f"<html><head>{style_tag}</head>{html}</html>"
+    return str(soup)
+
+
 def _truncate_html_body(html: str, char_budget: Optional[int]) -> tuple[str, int, bool]:
     """Keep whole top-level body elements until visible text reaches char_budget,
     so truncation never cuts a tag in half. char_budget=None means no truncation.
@@ -1263,7 +1285,7 @@ def _to_html_xlsx(path: Path, limit: Optional[int] = None) -> tuple[str, int, in
     preview_sheets = len(sheet_names)
     html = ["<html><body style='font-family:sans-serif'>"]
     for name in sheet_names:
-        html.append(f"<h3>{name}</h3><table border='1' cellpadding='4' cellspacing='0'>")
+        html.append(f"<h3>{name}</h3><table border='1' cellpadding='4' cellspacing='0' style='white-space:nowrap'>")
         for i, row in enumerate(wb[name].iter_rows(values_only=True)):
             tag = "th" if i == 0 else "td"
             html.append("<tr>" + "".join(f"<{tag}>{v if v is not None else ''}</{tag}>" for v in row) + "</tr>")
@@ -1433,7 +1455,7 @@ async def preview_document(
     except Exception as exc:
         raise HTTPException(500, f"Preview generation failed: {exc}") from exc
 
-    return HTMLResponse(content=html, headers=headers)
+    return HTMLResponse(content=_make_scrollable(html), headers=headers)
 
 
 @router.get("/api/documents/{document_id}/download")

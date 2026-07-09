@@ -86,7 +86,7 @@
 
   <!-- Preview Modal -->
   <div class="overlay hidden" id="preview-modal">
-    <div class="modal">
+    <div class="modal" id="preview-modal-inner">
       <div class="modal-head">
         <div>
           <h2 class="modal-title" id="preview-title">Document</h2>
@@ -94,6 +94,8 @@
         </div>
         <div class="modal-actions">
           <a class="btn btn-outline" id="preview-dl" href="#" download>⬇ Download</a>
+          <button class="btn btn-outline" id="preview-fullscreen-btn" onclick="togglePreviewFullscreen()"
+                  title="Toggle full screen">Full Screen</button>
           <button class="btn-close" onclick="closePreview()">✕</button>
         </div>
       </div>

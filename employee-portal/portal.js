@@ -176,6 +176,10 @@ function handleSearch(v) {
 async function openPreview(docId, title, meta = {}, pageNum = null) {
   const myToken = ++_previewToken;
 
+  // Always start a freshly-opened preview in standard view.
+  q('preview-modal').classList.remove('fullscreen');
+  q('preview-fullscreen-btn').textContent = 'Full Screen';
+
   q('preview-title').textContent = title;
   q('preview-meta').textContent = [
     meta.classification, meta.file_type, meta.department, meta.owner ? `by ${meta.owner}` : ''
@@ -308,7 +312,45 @@ async function loadFullPreviewInBackground(docId, myToken, apply) {
 
 function closePreview() {
   q('preview-modal').classList.add('hidden');
+  q('preview-modal').classList.remove('fullscreen');
   q('preview-body').innerHTML = '';
+}
+
+function togglePreviewFullscreen() {
+  const modal = q('preview-modal-inner');
+  const isFullscreen = q('preview-modal').classList.toggle('fullscreen');
+  // A manual drag-resize sets inline width/height on the element, which beats
+  // any stylesheet rule — including .fullscreen's width:100vw/height:100vh —
+  // so without this, Full Screen would silently no-op after a resize. Stash
+  // the resized size while fullscreen is on, then restore it on exit instead
+  // of snapping back to the default size.
+  if (isFullscreen) {
+    modal.dataset.prevWidth  = modal.style.width;
+    modal.dataset.prevHeight = modal.style.height;
+    modal.style.width  = '';
+    modal.style.height = '';
+  } else {
+    modal.style.width  = modal.dataset.prevWidth  || '';
+    modal.style.height = modal.dataset.prevHeight || '';
+  }
+  q('preview-fullscreen-btn').textContent = isFullscreen ? 'Exit Full Screen' : 'Full Screen';
+}
+
+// Dragging the modal's native resize handle fires a resize event on (almost)
+// every pixel — reflowing/repainting the preview iframe's full content is
+// what made it feel slow/glitchy. Adding "resizing" hides the iframe (see
+// CSS) for the duration; the 150ms silence-timeout after the last event is
+// what "the drag has settled" looks like via ResizeObserver, since it has no
+// native start/end signal of its own.
+function setupPreviewResizeOptimization() {
+  const modal = q('preview-modal-inner');
+  if (!modal || typeof ResizeObserver === 'undefined') return;
+  let settleTimer = null;
+  new ResizeObserver(() => {
+    modal.classList.add('resizing');
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => modal.classList.remove('resizing'), 150);
+  }).observe(modal);
 }
 
 /* ── Chat panel ─────────────────────────────────────────────────────────────── */
@@ -547,6 +589,7 @@ async function sendMessage() {
 
 /* ── Init ───────────────────────────────────────────────────────────────────── */
 async function init() {
+  setupPreviewResizeOptimization();
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (!q('preview-modal').classList.contains('hidden')) { closePreview(); return; }

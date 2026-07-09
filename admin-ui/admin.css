@@ -209,7 +209,26 @@ textarea.input { resize: vertical; }
   width: 100%; max-width: 540px; max-height: 90vh; display: flex; flex-direction: column;
   overflow: hidden;
 }
-.modal-xl { max-width: 920px; }
+/* Explicit width/height (not just max-width/max-height) give it a real
+   default size instead of shrinking to whatever the initial content needs;
+   resize lets an admin drag it bigger/smaller from there. max-width/max-height
+   are deliberately raised above the default width/height (rather than left
+   equal to it) so there's actual headroom to resize into — if they matched,
+   the resize ceiling would equal the starting size and dragging would do
+   nothing. width uses min() so it still shrinks to fit a narrow viewport
+   instead of overflowing it. Browsers only allow resize on elements whose
+   overflow isn't "visible", which the base .modal's overflow:hidden satisfies. */
+.modal-xl {
+  width: min(920px, 95vw); max-width: 95vw;
+  height: 85vh; max-height: 95vh;
+  min-width: 480px; min-height: 320px; resize: both;
+}
+/* An iframe reflows/repaints its full content on every pixel of a drag —
+   expensive for a PDF viewer or a big rendered document, which is what made
+   dragging the corner feel slow/glitchy. Hidden while actively resizing (see
+   the ResizeObserver in admin.js) so it only reflows once, at the final
+   settled size, instead of continuously during the drag. */
+.modal-xl.resizing .preview-wrap iframe { visibility: hidden; }
 .modal-lg { max-width: 640px; }
 .modal-sm { max-width: 400px; }
 .modal-head { display: flex; align-items: flex-start; justify-content: space-between;
@@ -221,13 +240,25 @@ textarea.input { resize: vertical; }
                border-top: 1px solid var(--c-border); margin-top: 8px; }
 
 /* ── Preview ────────────────────────────────────────────────────────────────── */
-.preview-wrap { padding: 0; position: relative; }
-.preview-wrap iframe { display: block; width: 100%; height: calc(90vh - 110px); border: none; }
-.preview-wrap img    { max-width: 100%; max-height: calc(90vh - 140px); display: block; margin: auto; }
+/* preview-wrap is a flex child of .modal (flex-direction:column) via its
+   shared .modal-body class, which resolves it a definite height each layout
+   pass — sizing the iframe/img/text to 100% of that (instead of a fixed
+   `calc(90vh - Npx)`) makes them adapt automatically whether the modal is at
+   its normal size or toggled to .modal-fullscreen, with no separate override. */
+.preview-wrap { padding: 0; position: relative; display: flex; flex-direction: column; }
+.preview-wrap iframe { display: block; width: 100%; height: 100%; border: none; flex: 1; }
+.preview-wrap img    { max-width: 100%; max-height: 100%; display: block; margin: auto; }
 .preview-text {
-  padding: 20px; overflow: auto; max-height: calc(90vh - 140px);
+  padding: 20px; overflow: auto; height: 100%;
   font-size: 13.5px; line-height: 1.6;
   font-family: monospace; white-space: pre-wrap;
+}
+
+/* Toggled by togglePreviewFullscreen() — expands the preview modal to fill
+   the viewport instead of its usual centered/max-width layout. */
+#preview-modal.fullscreen { padding: 0; }
+#preview-modal.fullscreen .modal {
+  width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh; border-radius: 0;
 }
 .preview-partial-note {
   position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
