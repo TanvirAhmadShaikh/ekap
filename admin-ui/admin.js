@@ -241,7 +241,7 @@ async function pageDashboard() {
     apiFetch('/api/documents?limit=1'),
     apiFetch('/api/documents?lifecycle_state=review&limit=1'),
     apiFetch('/api/documents?lifecycle_state=published&limit=1'),
-    apiFetch('/api/documents/trash'),
+    apiFetch('/api/documents/trash?limit=1'),
     apiFetch('/api/documents?limit=10'),
   ]);
   updateQueueBadge(review.total);
@@ -264,7 +264,7 @@ async function pageDashboard() {
         <div class="stat-label">Published</div>
       </div>
       <div class="stat-card slate">
-        <div class="stat-val">${trashData.trash?.length || 0}</div>
+        <div class="stat-val">${trashData.total ?? 0}</div>
         <div class="stat-label">In Trash</div>
       </div>
     </div>
@@ -283,8 +283,9 @@ async function pageDocuments() {
   const lc     = params.get('lc')     || '';
   const folder = params.get('folder') || '';
   const q_str  = params.get('q')      || '';
+  const off    = parseInt(params.get('off'), 10) || 0;
 
-  const qs = new URLSearchParams({ limit: 100 });
+  const qs = new URLSearchParams({ limit: PAGE_SIZE, offset: off });
   if (lc)     qs.set('lifecycle_state', lc);
   if (folder) qs.set('folder_id', folder);
   if (q_str)  qs.set('q', q_str);
@@ -318,7 +319,10 @@ async function pageDocuments() {
         </select>
       </div>
     </div>
-    <div class="card">${renderTable(docs, true)}</div>`;
+    <div class="card">
+      ${renderTable(docs, true)}
+      ${pagerHTML(off, PAGE_SIZE, data.total, 'gotoDocumentsPage')}
+    </div>`;
   startProcessingPoll(docs);
 }
 
@@ -330,13 +334,44 @@ async function refreshDocList(btn) {
 function setFilter(key, val) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
   if (val) p.set(key, val); else p.delete(key);
+  // A filter change invalidates whatever page you were on — back to page 1.
+  if (key !== 'off') p.delete('off');
   location.hash = '/documents?' + p.toString();
+}
+
+function gotoDocumentsPage(offset) {
+  setFilter('off', offset || '');
 }
 
 let _st;
 function debouncedSearch(v) {
   clearTimeout(_st);
   _st = setTimeout(() => setFilter('q', v), 280);
+}
+
+const PAGE_SIZE = 50;
+
+// Shared Prev/Next pager for any limit/offset/total-paginated list — gotoFn is
+// the name of a global function that takes the new offset as its only argument.
+// Returns '' (no controls) when everything already fits on one page.
+// extraArgs are literal numbers appended after the new offset in the onclick
+// call — for a page with more than one independent pager (e.g. the Approval
+// Queue's two tables), so paging one list can pass the other list's current
+// offset through unchanged instead of resetting it.
+function pagerHTML(offset, limit, total, gotoFn, extraArgs = []) {
+  if (total <= limit) return '';
+  const from = total === 0 ? 0 : offset + 1;
+  const to   = Math.min(offset + limit, total);
+  const args = n => [n, ...extraArgs].join(',');
+  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px">
+    <span style="font-size:12.5px;color:var(--c-muted)">${from}–${to} of ${total}</span>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" ${offset === 0 ? 'disabled' : ''}
+        onclick="${gotoFn}(${args(Math.max(0, offset - limit))})">← Newer</button>
+      <button class="btn btn-ghost btn-sm" ${offset + limit >= total ? 'disabled' : ''}
+        onclick="${gotoFn}(${args(offset + limit)})">Older →</button>
+    </div>
+  </div>`;
 }
 
 function renderTable(docs, withActions) {
@@ -447,16 +482,20 @@ async function deleteFolder(id, name) {
 }
 
 /* ── Approval Queue ─────────────────────────────────────────────────────────── */
-async function pageQueue() {
-  const data    = await apiFetch('/api/workflow/pending');
+async function pageQueue(changesOffset = 0, reviewOffset = 0) {
+  const qs = new URLSearchParams({
+    changes_limit: PAGE_SIZE, changes_offset: changesOffset,
+    review_limit: PAGE_SIZE, review_offset: reviewOffset,
+  });
+  const data    = await apiFetch(`/api/workflow/pending?${qs}`);
   const docs    = data.pending || [];
   const changes = data.pending_changes || [];
-  updateQueueBadge(docs.length + changes.length);
+  updateQueueBadge(data.count + data.pending_changes_count);
   q('content').innerHTML = `
     <div class="page-header"><h1>Approval Queue</h1></div>
 
     <div class="card" style="margin-bottom:16px">
-      <div class="card-head"><h2>Pending Changes</h2></div>
+      <div class="card-head"><h2>Pending Changes <span style="color:var(--c-muted);font-size:13px;font-weight:400">${data.pending_changes_count} total</span></h2></div>
       <p style="padding:12px 20px 0;font-size:12.5px;color:var(--c-muted)">
         Edits or deletions made by someone other than the document's owner — staged here until the
         owner (shown below) approves them. Nothing here has taken effect yet.
@@ -482,10 +521,11 @@ async function pageQueue() {
           </tr>`).join('')}
           </tbody></table></div>`}
       </div>
+      ${pagerHTML(changesOffset, PAGE_SIZE, data.pending_changes_count, 'gotoQueueChangesPage', [reviewOffset])}
     </div>
 
     <div class="card">
-      <div class="card-head"><h2>Content Review</h2></div>
+      <div class="card-head"><h2>Content Review <span style="color:var(--c-muted);font-size:13px;font-weight:400">${data.count} total</span></h2></div>
       ${!docs.length
         ? '<div class="empty"><div class="empty-icon">✅</div><p>No documents awaiting approval.</p></div>'
         : `<div class="table-wrap"><table class="data-table"><thead><tr>
@@ -507,7 +547,18 @@ async function pageQueue() {
             </td>
           </tr>`).join('')}
           </tbody></table></div>`}
+      ${pagerHTML(reviewOffset, PAGE_SIZE, data.count, 'gotoQueueReviewPage', [changesOffset])}
     </div>`;
+}
+
+// pagerHTML calls gotoFn(newOffset, ...extraArgs) — each wrapper's own list's
+// new offset comes first, followed by the OTHER list's current offset (passed
+// through as extraArgs), so paging one table doesn't reset the other's page.
+function gotoQueueChangesPage(changesOffset, reviewOffset) {
+  pageQueue(changesOffset, reviewOffset);
+}
+function gotoQueueReviewPage(reviewOffset, changesOffset) {
+  pageQueue(changesOffset, reviewOffset);
 }
 
 function describeChange(c) {
@@ -541,11 +592,13 @@ async function decideChange(changeId, action, title) {
 }
 
 /* ── Trash ──────────────────────────────────────────────────────────────────── */
-async function pageTrash() {
-  const data = await apiFetch('/api/documents/trash');
+async function pageTrash(offset = 0) {
+  const data = await apiFetch(`/api/documents/trash?limit=${PAGE_SIZE}&offset=${offset}`);
   const docs = data.trash || [];
   q('content').innerHTML = `
-    <div class="page-header"><h1>Trash</h1></div>
+    <div class="page-header">
+      <h1>Trash <span style="color:var(--c-muted);font-size:14px;font-weight:400">${data.total} total</span></h1>
+    </div>
     <div class="card">
       ${!docs.length
         ? '<div class="empty"><div class="empty-icon">🗑</div><p>Trash is empty.</p></div>'
@@ -558,11 +611,14 @@ async function pageTrash() {
             <td>${esc(d.file_type||'—')}</td>
             <td>${fmt(d.deleted_at)}</td>
             <td class="actions">
+              <button class="btn btn-xs btn-ghost"
+                onclick='openAuditTrail(${attrJson(d.document_id)},${attrJson(d.title)})'>🕒 History</button>
               <button class="btn btn-xs btn-success"
                 onclick="undelete('${esc(d.document_id)}','${esc(d.title)}')">Restore</button>
             </td>
           </tr>`).join('')}
           </tbody></table></div>`}
+      ${pagerHTML(offset, PAGE_SIZE, data.total, 'pageTrash')}
     </div>`;
 }
 
@@ -1132,41 +1188,44 @@ function setupPreviewResizeOptimization() {
 
 /* ── Audit trail (versions + workflow transitions, merged) ────────────────────── */
 let _auditDocId = null;
+let _auditTitle  = '';
 
-async function openAuditTrail(docId, title) {
+async function openAuditTrail(docId, title, offset = 0) {
   _auditDocId = docId;
+  _auditTitle = title;
   q('audit-title').textContent = `Audit Trail — ${title}`;
   q('audit-body').innerHTML = '<div class="spinner-wrap"><div class="spinner"></div></div>';
   q('audit-modal').classList.remove('hidden');
 
   try {
-    const [versions, workflow] = await Promise.all([
+    // /audit-trail is the merged, paginated timeline (versions + workflow +
+    // access log, server-side sorted). /versions is fetched separately,
+    // unbounded, purely to populate the Compare dropdowns below — those need
+    // every version number, not just whatever's on the current timeline page.
+    const [trail, versions] = await Promise.all([
+      apiFetch(`/api/documents/${docId}/audit-trail?limit=${PAGE_SIZE}&offset=${offset}`),
       apiFetch(`/api/documents/${docId}/versions`),
-      apiFetch(`/api/documents/${docId}/workflow`),
     ]);
-    // Manager-only — a 403 here shouldn't break the rest of the audit trail.
-    let accessLog = { access_log: [] };
-    try { accessLog = await apiFetch(`/api/documents/${docId}/access-log`); } catch(e) {}
 
     const versionList = versions.versions || []; // API returns newest-first
-    const events = [
-      ...versionList.map(v => ({
-        ts: v.created_at, icon: '📄',
-        title: `Version ${v.version_number} uploaded`,
-        by: v.uploaded_by, note: v.change_note,
-        meta: [v.file_type, fmtBytes(v.file_size)].filter(Boolean).join(' · '),
-      })),
-      ...(workflow.history || []).map(h => ({
-        ts: h.created_at, icon: '🔄',
-        title: h.from_state ? `${h.from_state} → ${h.to_state}` : `Created (${h.to_state})`,
-        by: h.username || h.user_id, note: h.comment,
-      })),
-      ...(accessLog.access_log || []).map(a => ({
-        ts: a.timestamp, icon: a.event_type === 'DOCUMENT_DOWNLOADED' ? '⬇' : '👁',
-        title: a.event_type === 'DOCUMENT_DOWNLOADED' ? 'Downloaded' : 'Viewed',
-        by: a.user_id,
-      })),
-    ].sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    const events = (trail.events || []).map(e => {
+      if (e.kind === 'version') return {
+        ts: e.ts, icon: '📄',
+        title: `Version ${e.version_number} uploaded`,
+        by: e.actor, note: e.note,
+        meta: [e.file_type, fmtBytes(e.file_size)].filter(Boolean).join(' · '),
+      };
+      if (e.kind === 'workflow') return {
+        ts: e.ts, icon: '🔄',
+        title: e.from_state ? `${e.from_state} → ${e.to_state}` : `Created (${e.to_state})`,
+        by: e.actor, note: e.note,
+      };
+      return {
+        ts: e.ts, icon: e.event_type === 'DOCUMENT_DOWNLOADED' ? '⬇' : '👁',
+        title: e.event_type === 'DOCUMENT_DOWNLOADED' ? 'Downloaded' : 'Viewed',
+        by: e.actor,
+      };
+    });
 
     const compareBlock = versionList.length < 2 ? '' : `
       <div class="version-compare">
@@ -1197,7 +1256,7 @@ async function openAuditTrail(docId, title) {
               </div>
               ${e.note ? `<div class="audit-item-note">${esc(e.note)}</div>` : ''}
             </div>
-          </div>`).join('')}</div>`);
+          </div>`).join('')}</div>${pagerHTML(offset, PAGE_SIZE, trail.total, 'gotoAuditTrailPage')}`);
 
     if (versionList.length >= 2) {
       q('diff-to').value   = versionList[0].version_number;
@@ -1206,6 +1265,10 @@ async function openAuditTrail(docId, title) {
   } catch(e) {
     q('audit-body').innerHTML = `<div class="empty"><div class="empty-icon">⚠</div><p>${esc(e.message)}</p></div>`;
   }
+}
+
+function gotoAuditTrailPage(offset) {
+  openAuditTrail(_auditDocId, _auditTitle, offset);
 }
 
 async function runVersionDiff() {

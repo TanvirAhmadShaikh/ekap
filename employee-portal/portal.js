@@ -33,22 +33,66 @@ const FILE_ICONS = {
 const fileIcon = t => FILE_ICONS[t] || '📄';
 
 /* ── State ──────────────────────────────────────────────────────────────────── */
-let _docs    = [];
+const PAGE_SIZE = 24;
 let _folders = [];
 let _active  = null;  // active folder_id or null (= All)
 let _query   = '';
-let _searchResults = null; // null = not searching; array = server search results (corpus-wide)
-let _searching = false;
+let _offset  = 0;
+let _currentDocs  = [];
+let _currentTotal = 0;
+let _loading = false;
 let _previewToken = 0;
 
 /* ── Load data ──────────────────────────────────────────────────────────────── */
 async function loadAll() {
-  const [fData, dData] = await Promise.all([
-    apiFetch('/api/folders'),
-    apiFetch('/api/documents?lifecycle_state=published&limit=200'),
-  ]);
+  const fData = await apiFetch('/api/folders');
   _folders = fData.folders || [];
-  _docs    = dData.documents || [];
+  await loadDocs();
+}
+
+// One page of documents from the server for whatever's currently selected
+// (folder and/or search query) — folder filtering and search both happen
+// server-side (via folder_id/q on /api/documents) so paging works no matter
+// how many published documents exist, not just however many got bulk-loaded.
+async function loadDocs() {
+  _loading = true;
+  renderMain();
+  const qs = new URLSearchParams({ lifecycle_state: 'published', limit: PAGE_SIZE, offset: _offset });
+  if (_active) qs.set('folder_id', _active);
+  if (_query)  qs.set('q', _query);
+  try {
+    const data = await apiFetch(`/api/documents?${qs}`);
+    _currentDocs  = data.documents || [];
+    _currentTotal = data.total || 0;
+  } catch(e) {
+    _currentDocs = [];
+    _currentTotal = 0;
+    toast(e.message, 'error');
+  }
+  _loading = false;
+  renderMain();
+}
+
+function gotoDocsPage(offset) {
+  _offset = offset;
+  loadDocs();
+}
+
+// Mirrors admin-ui's pagerHTML — Prev/Next controls for any limit/offset/total
+// paginated list. Returns '' when everything already fits on one page.
+function pagerHTML(offset, limit, total) {
+  if (total <= limit) return '';
+  const from = total === 0 ? 0 : offset + 1;
+  const to   = Math.min(offset + limit, total);
+  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:16px 2px 4px">
+    <span style="font-size:12.5px;color:var(--c-muted)">${from}–${to} of ${total}</span>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-outline" ${offset === 0 ? 'disabled' : ''}
+        onclick="gotoDocsPage(${Math.max(0, offset - limit)})">← Newer</button>
+      <button class="btn btn-outline" ${offset + limit >= total ? 'disabled' : ''}
+        onclick="gotoDocsPage(${offset + limit})">Older →</button>
+    </div>
+  </div>`;
 }
 
 /* ── Folder tree ────────────────────────────────────────────────────────────── */
@@ -74,31 +118,6 @@ function renderSidebar() {
 }
 
 /* ── Documents ──────────────────────────────────────────────────────────────── */
-// While a search query is active, results come from the server (real corpus
-// search over title/owner/full document content — see performSearch) rather
-// than filtering the already-loaded folder listing, so search covers every
-// published document regardless of folder or how many are loaded locally.
-function visibleDocs() {
-  if (_query) return _searchResults || [];
-  let docs = _docs;
-  if (_active) docs = docs.filter(d => d.folder_id === _active);
-  return docs;
-}
-
-async function performSearch(query) {
-  _searching = true;
-  renderMain();
-  try {
-    const data = await apiFetch(`/api/documents?q=${encodeURIComponent(query)}&lifecycle_state=published&limit=100`);
-    _searchResults = data.documents || [];
-  } catch(e) {
-    _searchResults = [];
-    toast(e.message, 'error');
-  }
-  _searching = false;
-  renderMain();
-}
-
 function renderDocGrid(docs) {
   if (!docs.length) return `<div class="empty">
     <div class="empty-icon">📭</div>
@@ -124,16 +143,17 @@ function renderDocGrid(docs) {
 }
 
 function renderMain() {
-  const docs = visibleDocs();
   const title = _query
-    ? `Search results for "${esc(_query)}" (${_searching ? '…' : docs.length})`
+    ? `Search results for "${esc(_query)}" (${_loading ? '…' : _currentTotal})`
     : _active
-      ? (findFolder(_folders, _active)?.name || 'Documents') + ` (${docs.length})`
-      : `All Documents (${docs.length})`;
+      ? (findFolder(_folders, _active)?.name || 'Documents') + ` (${_currentTotal})`
+      : `All Documents (${_currentTotal})`;
 
   q('main-content').innerHTML = `
     <div class="section-title">${title}</div>
-    ${_searching ? '<div class="loading-wrap"><div class="spinner"></div></div>' : renderDocGrid(docs)}`;
+    ${_loading
+      ? '<div class="loading-wrap"><div class="spinner"></div></div>'
+      : renderDocGrid(_currentDocs) + pagerHTML(_offset, PAGE_SIZE, _currentTotal)}`;
 }
 
 function findFolder(nodes, id) {
@@ -148,11 +168,11 @@ function findFolder(nodes, id) {
 function selectFolder(id) {
   _active = id;
   _query  = '';
-  _searchResults = null;
+  _offset = 0;
   const input = q('search-input');
   if (input) input.value = '';
   renderSidebar();
-  renderMain();
+  loadDocs();
 }
 
 let _st;
@@ -160,9 +180,9 @@ function handleSearch(v) {
   clearTimeout(_st);
   const query = v.trim();
   _st = setTimeout(() => {
-    _query = query;
-    if (!query) { _searchResults = null; renderMain(); }
-    else performSearch(query);
+    _query  = query;
+    _offset = 0;
+    loadDocs();
   }, 250);
 }
 

@@ -391,7 +391,10 @@ async def list_versions(document_id: str, user: UserContext = Depends(get_user_c
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            doc = _require_doc(cur, document_id)
+            # include_deleted: version history is still viewable for a document
+            # sitting in Trash (e.g. from the Audit Trail modal) — deletion isn't
+            # a reason to hide what happened to it beforehand.
+            doc = _require_doc(cur, document_id, include_deleted=True)
             if doc["classification"] not in user.accessible_classifications and not user.can_manage_documents():
                 raise HTTPException(403, "Access denied.")
             cur.execute(
@@ -1123,7 +1126,7 @@ async def release_legal_hold(document_id: str, user: UserContext = Depends(get_u
 # ── Soft delete / Trash ───────────────────────────────────────────────────────
 
 @router.get("/api/documents/trash")
-async def list_trash(user: UserContext = Depends(get_user_context)):
+async def list_trash(limit: int = 50, offset: int = 0, user: UserContext = Depends(get_user_context)):
     if not user.can_manage_documents():
         raise HTTPException(403, "Requires knowledge-manager or higher.")
     conn = get_conn()
@@ -1131,10 +1134,15 @@ async def list_trash(user: UserContext = Depends(get_user_context)):
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT document_id, title, owner, classification, file_type, deleted_at "
-                "FROM documents WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+                "FROM documents WHERE deleted_at IS NOT NULL "
+                "ORDER BY deleted_at DESC LIMIT %s OFFSET %s",
+                (limit, offset),
             )
             cols = [d[0] for d in cur.description]
-            return {"trash": [dict(zip(cols, r)) for r in cur.fetchall()]}
+            trash = [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur.execute("SELECT COUNT(*) FROM documents WHERE deleted_at IS NOT NULL")
+            total = cur.fetchone()[0]
+            return {"trash": trash, "total": total, "limit": limit, "offset": offset}
     finally:
         conn.close()
 
@@ -1268,7 +1276,9 @@ async def workflow_history(document_id: str, user: UserContext = Depends(get_use
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            doc = _require_doc(cur, document_id)
+            # include_deleted: same reasoning as list_versions above — a trashed
+            # document's workflow history is still valid audit-trail content.
+            doc = _require_doc(cur, document_id, include_deleted=True)
             if doc["classification"] not in user.accessible_classifications and not user.can_manage_documents():
                 raise HTTPException(403, "Access denied.")
             cur.execute(
@@ -1290,9 +1300,72 @@ async def workflow_history(document_id: str, user: UserContext = Depends(get_use
         conn.close()
 
 
+@router.get("/api/documents/{document_id}/audit-trail")
+async def audit_trail(document_id: str, limit: int = 50, offset: int = 0,
+                       user: UserContext = Depends(get_user_context)):
+    """Versions + workflow transitions + access log (views/downloads), merged
+    into one timestamp-ordered, paginated feed — same events openAuditTrail()
+    used to fetch as three separate unbounded lists and merge/sort client-side.
+    Access-log rows are manager-only (see /access-log) and silently omitted
+    for anyone else, rather than 403ing the whole trail.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # include_deleted: matches list_versions/workflow_history/access_log
+            # below, all of which allow viewing a trashed document's history.
+            doc = _require_doc(cur, document_id, include_deleted=True)
+            if doc["classification"] not in user.accessible_classifications and not user.can_manage_documents():
+                raise HTTPException(403, "Access denied.")
+
+            branches = [
+                "SELECT created_at AS ts, 'version' AS kind, uploaded_by AS actor, change_note AS note, "
+                "version_number, file_type, file_size, NULL::text AS from_state, NULL::text AS to_state, "
+                "NULL::text AS event_type "
+                "FROM document_versions WHERE document_id=%s",
+                "SELECT created_at AS ts, 'workflow' AS kind, COALESCE(username, user_id) AS actor, comment AS note, "
+                "NULL::int AS version_number, NULL::text AS file_type, NULL::bigint AS file_size, "
+                "from_state, to_state, NULL::text AS event_type "
+                "FROM workflow_transitions WHERE document_id=%s",
+            ]
+            params = [document_id, document_id]
+            if user.can_manage_documents():
+                branches.append(
+                    "SELECT timestamp AS ts, 'access' AS kind, user_id AS actor, NULL::text AS note, "
+                    "NULL::int AS version_number, NULL::text AS file_type, NULL::bigint AS file_size, "
+                    "NULL::text AS from_state, NULL::text AS to_state, event_type "
+                    "FROM audit_log WHERE resource_id=%s AND event_type IN ('DOCUMENT_VIEWED','DOCUMENT_DOWNLOADED')"
+                )
+                params.append(document_id)
+
+            union_sql = " UNION ALL ".join(branches)
+            cur.execute(
+                f"SELECT * FROM ({union_sql}) combined ORDER BY ts DESC LIMIT %s OFFSET %s",
+                params + [limit, offset],
+            )
+            cols = [d[0] for d in cur.description]
+            events = [dict(zip(cols, r)) for r in cur.fetchall()]
+            for e in events:
+                e["ts"] = str(e["ts"])
+
+            cur.execute(f"SELECT COUNT(*) FROM ({union_sql}) combined", params)
+            total = cur.fetchone()[0]
+
+        return {
+            "document_id": document_id, "events": events,
+            "total": total, "limit": limit, "offset": offset,
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/api/workflow/pending")
-async def pending_reviews(user: UserContext = Depends(get_user_context)):
-    """Two independent queues folded into one response:
+async def pending_reviews(
+    review_limit: int = 50, review_offset: int = 0,
+    changes_limit: int = 50, changes_offset: int = 0,
+    user: UserContext = Depends(get_user_context),
+):
+    """Two independent, independently-paginated queues folded into one response:
     - "pending": documents in lifecycle_state='review' — the existing content
       publishing workflow, visible to knowledge-managers/admins only.
     - "pending_changes": edits/deletions staged because the actor wasn't the
@@ -1300,41 +1373,62 @@ async def pending_reviews(user: UserContext = Depends(get_user_context)):
       the affected document (any role), plus knowledge-managers/admins for
       oversight. A plain "user" who owns documents gets a non-empty
       pending_changes list here even though "pending" stays empty for them.
+
+    "count"/"pending_changes_count" are the TRUE totals (not just this page's
+    length) — the sidebar badge sums these, so they must reflect everything
+    still pending, independent of review_limit/changes_limit.
     """
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            docs = []
+            docs, review_total = [], 0
             if user.can_manage_documents():
                 cur.execute(
                     "SELECT document_id, title, owner, department, classification, "
                     "file_type, updated_at "
                     "FROM documents "
                     "WHERE lifecycle_state='review' AND deleted_at IS NULL "
-                    "ORDER BY updated_at ASC"
+                    "ORDER BY updated_at ASC LIMIT %s OFFSET %s",
+                    (review_limit, review_offset),
                 )
                 cols = [d[0] for d in cur.description]
                 docs = [dict(zip(cols, r)) for r in cur.fetchall()]
                 for d in docs:
                     d["updated_at"] = str(d["updated_at"])
+                cur.execute(
+                    "SELECT COUNT(*) FROM documents WHERE lifecycle_state='review' AND deleted_at IS NULL"
+                )
+                review_total = cur.fetchone()[0]
 
             if user.can_manage_documents():
                 cur.execute(
                     "SELECT pc.id, pc.document_id, pc.change_type, pc.payload, pc.requested_by, "
                     "pc.requested_at, d.title, d.owner, d.classification "
                     "FROM pending_changes pc JOIN documents d ON pc.document_id = d.document_id "
-                    "WHERE pc.status='pending' ORDER BY pc.requested_at ASC"
+                    "WHERE pc.status='pending' ORDER BY pc.requested_at ASC LIMIT %s OFFSET %s",
+                    (changes_limit, changes_offset),
                 )
+                cols = [d[0] for d in cur.description]
+                changes = [dict(zip(cols, r)) for r in cur.fetchall()]
+                cur.execute("SELECT COUNT(*) FROM pending_changes WHERE status='pending'")
+                changes_total = cur.fetchone()[0]
             else:
                 cur.execute(
                     "SELECT pc.id, pc.document_id, pc.change_type, pc.payload, pc.requested_by, "
                     "pc.requested_at, d.title, d.owner, d.classification "
                     "FROM pending_changes pc JOIN documents d ON pc.document_id = d.document_id "
-                    "WHERE pc.status='pending' AND d.owner=%s ORDER BY pc.requested_at ASC",
+                    "WHERE pc.status='pending' AND d.owner=%s "
+                    "ORDER BY pc.requested_at ASC LIMIT %s OFFSET %s",
+                    (user.username, changes_limit, changes_offset),
+                )
+                cols = [d[0] for d in cur.description]
+                changes = [dict(zip(cols, r)) for r in cur.fetchall()]
+                cur.execute(
+                    "SELECT COUNT(*) FROM pending_changes pc JOIN documents d ON pc.document_id = d.document_id "
+                    "WHERE pc.status='pending' AND d.owner=%s",
                     (user.username,),
                 )
-            cols = [d[0] for d in cur.description]
-            changes = [dict(zip(cols, r)) for r in cur.fetchall()]
+                changes_total = cur.fetchone()[0]
             for c in changes:
                 c["requested_at"] = str(c["requested_at"])
                 # The owner reviewing this shouldn't see (or need) our internal
@@ -1343,8 +1437,10 @@ async def pending_reviews(user: UserContext = Depends(get_user_context)):
                     c["payload"] = {k: v for k, v in c["payload"].items() if k != "staged_path"}
 
         return {
-            "pending": docs, "count": len(docs),
-            "pending_changes": changes, "pending_changes_count": len(changes),
+            "pending": docs, "count": review_total,
+            "review_limit": review_limit, "review_offset": review_offset,
+            "pending_changes": changes, "pending_changes_count": changes_total,
+            "changes_limit": changes_limit, "changes_offset": changes_offset,
         }
     finally:
         conn.close()
